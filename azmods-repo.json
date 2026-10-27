@@ -1,0 +1,52 @@
+{
+  "azmods_repo": 1,
+  "name": "JC's AZ Mods",
+  "maintainer": "johnnycoombes",
+  "homepage": "https://github.com/johnnycoombes/az-mods/tree/main/active-loop",
+  "mods": [
+    {
+      "id": "active-loop",
+      "name": "Active Loop Picker",
+      "version": "0.2.7",
+      "author": "JC",
+      "summary": "Pick any stored loop as Active without a jump; loops read at load; Auto-advance on exit.",
+      "icon": "https://github.com/johnnycoombes/az-mods/releases/download/active-loop-0.2.7/active-loop-0.2.7-icon.png",
+      "package": "https://github.com/johnnycoombes/az-mods/releases/download/active-loop-0.2.7/active-loop-0.2.7.azmod",
+      "sha256": "07b75d662a3a9926c8bfc90728edcf19345ef23b0aa689da87088e1630e1b64f",
+      "size": 108530,
+      "firmware": [
+        "ep147-9e9454e357389ece"
+      ],
+      "hooks": true,
+      "source": "https://github.com/johnnycoombes/az-mods/tree/main/active-loop",
+      "updated": "2026-10-27",
+      "category": "controls",
+      "license": "GPL-3.0-only",
+      "min_core": "1.2.3",
+      "description": "Choose which of a track's stored loops is the Active Loop, without the playhead jumping. When a track loads, the loop you marked as Active Loop in rekordbox is armed (otherwise the first stored loop ahead), and it engages on its own when the playhead reaches it. With Auto-advance on, the next stored loop ahead takes over after you exit. SHIFT+MEMORY cycles the loops ahead; SHIFT+pad makes a hot cue loop Active. Reads the stick's analysis files, never writes them. Patches the deck software's code: firmware 2.00/2.01 only. Settings in its Mod Menu page.",
+      "beta": true
+    },
+    {
+      "id": "tempo-range",
+      "name": "Custom Tempo Range",
+      "version": "0.1.15",
+      "author": "JC",
+      "summary": "Maps +/-6/10/16 TEMPO slots to +/-4/8/16; WIDE stays +/-100%. Shows deck BPM with 2 decimals (125.00).",
+      "icon": "https://github.com/johnnycoombes/az-mods/releases/download/tempo-range-0.1.15/tempo-range-0.1.15-icon.png",
+      "package": "https://github.com/johnnycoombes/az-mods/releases/download/tempo-range-0.1.15/tempo-range-0.1.15.azmod",
+      "sha256": "6f18a9abce4d95cdce6524de275fc2caea09d1d063a9f35aa29e992970c96524",
+      "size": 66162,
+      "firmware": [
+        "ep147-9e9454e357389ece"
+      ],
+      "hooks": true,
+      "source": "https://github.com/johnnycoombes/az-mods/tree/main/tempo-range",
+      "updated": "2026-10-27",
+      "category": "controls",
+      "license": "GPL-3.0-only",
+      "min_core": "1.2.3",
+      "description": "TEMPO RANGE slots +/-6/10/16 become +/-4/8/16 (each selectable, std = stock) on all four decks; WIDE stays +/-100%. Draws the deck BPM to two decimals (125.00) and the chosen +/-NN label; in the 2-deck view both follow the layer (1/3, 2/4). Firmware 2.00/2.01 (ep147-9e9454e357389ece) only: hooks TempoCtl::recompute and re-feeds ST_SET_TEMPO so playback and Link follow. Conflicts with the bpm2dp mod (both draw over the BPM digits): turn bpm2dp off.",
+      "beta": true
+    }
+  ]
+}
