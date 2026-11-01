@@ -1,6 +1,18 @@
 /* SPDX-License-Identifier: GPL-3.0-only
  *
- * active-loop 0.2.12 — Active Loop Picker for EP147 (XDJ-AZ 2.00/2.01).
+ * active-loop 0.2.13 — Active Loop Picker for EP147 (XDJ-AZ 2.00/2.01).
+ *
+ * 0.2.13: DELETE+pad works on the real deck (Johnny's 0.2.12 report: holding DELETE and pressing a loop hot-cue pad removed nothing, so
+ *        a pad could not be removed at all: SHIFT+pad is the mod's ARM gesture on a loop pad, DELETE+pad was its only delete).
+ *        The filter used to turn DELETE+pad into SHIFT+pad by setting the SHIFT bit one ERP frame ahead of the pad. One frame is 60+ ms on
+ *        the emulator (17 frames/s, where every test passed) but ~1 ms on the deck (~1000 frames/s), so stock saw SHIFT and the pad at
+ *        the same instant, nothing like a hand's SHIFT+pad. Now the pad that goes down under DELETE is eaten and handed to the SHIFT+pad
+ *        replay: SHIFT alone for 40 ms (lead_frames, from the measured frame rate; 1 frame at the emulator's rate), then SHIFT+pad for
+ *        the 40 ms replay length, then both up. A short tap is delivered too (the old code delivered the pad's physical level and a
+ *        tap shorter than the lead would have been lost). The same lead now applies to the tick's SHIFT+pad replay of a point cue. If a DELETE+pad
+ *        is not followed by a hot cue delete (no deleteCue within 0.8 s) the log says so and the next one leads by twice as long
+ *        (40 -> 80 -> 160 ms). Nothing else changed: SHIFT+pad arm, tap replay, empty-pad swallow, the pulse, persistence and every
+ *        0.2.10 safety rule are as 0.2.12.
  *
  * 0.2.12: the breath is slower and goes all the way out. One cycle is 4 s (was 2 s) and the armed pad fades from full red (FF0000)
  *        down to OFF (red byte 0, the whole cell 00 00 00) and back, instead of stopping at a dim red. The curve is shaped so the pad
@@ -444,7 +456,8 @@ static struct __attribute__((aligned(64))) {
         uint8_t  dh[2];     /* filter-only: DELETE held (not with SHIFT first) since this frame count started */
         uint8_t  du[2];     /* filter-only: a pad or SHIFT joined that DELETE hold: it is not a tap */
         uint8_t  dh_t0[2];  /* filter-only: heartbeat count at DELETE down; after the release: start of the tap replay */
-        uint8_t  sl[2];     /* filter-only: SHIFT was asserted by the filter on the previous frame (it leads the pad by 1 frame) */
+        uint8_t  sl[2];     /* filter-only: unused since 0.2.13 (was: SHIFT asserted by the filter on the previous frame) */
+        uint8_t  hd[2];     /* filter-only (0.2.13): pad bits that went down while a SHIFT+pad replay was running: held back until it ends, so stock never sees them under our SHIFT */
         uint32_t fi;        /* filter-only (tick reads): running estimate of the TYPICAL frame interval, cntvct ticks (0.2.8 al028d) */
         uint8_t  fn;        /* filter-only (tick reads): intervals measured so far, saturates at 255 */
         uint8_t  pe[2];     /* filter-only: pad bits that went down under SHIFT (or on an empty pad under DELETE): kept eaten until the pad is up */
@@ -468,6 +481,7 @@ static struct __attribute__((aligned(64))) {
         uint32_t gthr;      /* floor of the stall threshold, cntvct ticks (5 ms); the threshold is 3x the typical frame interval (fi), never below this */
         uint32_t req;       /* tick -> filter: replay SHIFT+pad: RQ_VALID | side << 9 | pad bits (0 = none) */
         uint32_t rp_frames; /* tick writes: replay length in FRAMES (40 ms at the measured frame rate) */
+        uint32_t lead_frames; /* tick writes (0.2.13): SHIFT leads a synthesized SHIFT+pad by this many FRAMES (>= 1; 40 ms at the measured rate) */
         uint32_t emp;       /* tick writes while DELETE is held on a side: pad bits known EMPTY (side A bits 0..7, side B 8..15), else 0 */
     };
 } FS;
@@ -475,6 +489,11 @@ static struct __attribute__((aligned(64))) {
 #define FI_MIN 16u                  /* intervals needed before the stall test and the replay length are trusted */
 #define FI_CAP 0x40000000ull        /* one interval sample, cntvct ticks (caps a stall that opens the measurement) */
 _Static_assert(sizeof FS == 192 && __builtin_offsetof(typeof(FS), fmax) == 64 && __builtin_offsetof(typeof(FS), cfg) == 128, "FS: three lines, one writer each");
+#define LEAD_MS_MIN 40u                  /* SHIFT alone before a synthesized SHIFT+pad: a hand needs more than this */
+#define LEAD_MS_MAX 160u
+static uint32_t lead_ms = LEAD_MS_MIN;   /* tick-only; raised when a DELETE+pad was not followed by a hot cue delete */
+static uint64_t dlp_wait_ns;             /* tick-only: when the last DELETE+pad was seen by the tick, until its delete is confirmed or missed */
+static int      dlp_got;                 /* tick-only: a hot cue deleteCue (kind >= 1) arrived since */
 static uint64_t tk_snap;               /* tick-only: last snapshot processed */
 static int      tk_hb_same, filter_dead, tk_hb_seen;
 static uint64_t press_obs_ns[2];       /* tick-only: when the tick saw a PRESS per side */
@@ -965,6 +984,9 @@ static inline __attribute__((always_inline)) void erp_work(unsigned char *frame,
         FS.rp[rs] = (uint8_t)(rq & 0xffu); FS.rp_t0[rs] = (uint8_t)hb;
     }
     const uint32_t rpf = FS.rp_frames;
+    uint32_t ln = __atomic_load_n(&FS.lead_frames, __ATOMIC_RELAXED);
+    if (ln < 1) ln = 1;
+    if (ln + rpf > 250u) ln = rpf < 250u ? 250u - rpf : 1u;
     const uint32_t emp = __atomic_load_n(&FS.emp, __ATOMIC_RELAXED);
     for (int s = 0; s < 2; s++) {
         unsigned c = (cur >> (14 * s)) & 0x3fffu, r = (rise >> (14 * s)) & 0x3fffu;
@@ -1013,7 +1035,6 @@ static inline __attribute__((always_inline)) void erp_work(unsigned char *frame,
          * pad itself is up: if SHIFT came up first the pad level used to reach stock as a NEW plain press (on an
          * empty pad: a stored hot cue; on a loop pad: the loop). The same for a pad pressed under DELETE on an
          * EMPTY pad (emp, published by the tick while DELETE is held): swallowed, never sent as SHIFT+pad. */
-        int lead = 0;                                   /* the filter makes SHIFT up on this frame itself */
         unsigned pe = FS.pe[s], padr = (r >> 6) & 0xffu;
         if (do_pad && sh) pe |= padr;
         if (sh) {
@@ -1027,36 +1048,40 @@ static inline __attribute__((always_inline)) void erp_work(unsigned char *frame,
                 FS.dle = ((FS.dle & 0xffff0000u) + 0x10000u) | ((uint32_t)s << 8) | (uint32_t)(__builtin_ctz(sw) + 1);
                 pe |= sw;
             }
-            frame[SO[s].pad_o] &= (unsigned char)~pe;
-            if (frame[SO[s].pad_o]) {                    /* DELETE+pad -> SHIFT+pad */
-                frame[SO[s].sh_o] |= shm; lead = 1;
-                if (padr & ~pe) {
-                    FS.dlp = ((FS.dlp & 0xffff0000u) + 0x10000u) | ((uint32_t)s << 8) | (uint32_t)(__builtin_ctz(padr & ~pe) + 1);
-                }
+            /* 0.2.13: DELETE+pad is no longer the pad's level rewritten with SHIFT one frame ahead (a 1 ms lead on the deck's
+             * ~1000 frames/s, 60+ ms on the emulator's 17/s: only the emulator ever proved that was enough). The pad that
+             * went down under DELETE is eaten for as long as the finger is on it, and handed to the SHIFT+pad replay below:
+             * SHIFT alone for lead_frames (40 ms), then SHIFT+pad for rp_frames, as a hand does it. */
+            const unsigned go = padr & ~pe;              /* non-empty pads that went down now */
+            if (go) {
+                pe |= go;
+                FS.rp[s] = (uint8_t)(FS.rp[s] | go); FS.rp_t0[s] = (uint8_t)hb;
+                FS.dlp = ((FS.dlp & 0xffff0000u) + 0x10000u) | ((uint32_t)s << 8) | (uint32_t)(__builtin_ctz(go) + 1);
             }
+            frame[SO[s].pad_o] &= (unsigned char)~pe;
         } else if (do_pad) frame[SO[s].pad_o] &= (unsigned char)~pe;
         if (do_pad) { pe &= (c >> 6) & 0xffu; FS.pe[s] = (uint8_t)pe; }
         if (FS.rp[s]) {
-            if ((unsigned)((uint8_t)(hb - FS.rp_t0[s])) < rpf) {
-                frame[SO[s].pad_o] |= FS.rp[s]; frame[SO[s].sh_o] |= shm; lead = lead | 2;
+            /* a plain pad that goes down while OUR SHIFT is up would reach stock as SHIFT+pad (= a hot cue DELETE): hold it back until the
+             * replay window is over, then it passes as the plain press it is (level based: a finger still on it gives the press, late). */
+            unsigned hd = FS.hd[s] | (padr & ~pe);
+            FS.hd[s] = (uint8_t)hd;
+            frame[SO[s].pad_o] &= (unsigned char)~hd;
+        } else FS.hd[s] = 0;
+        if (FS.rp[s]) {
+            /* SHIFT+pad replay (the tick's request for a point cue, and DELETE+pad above): SHIFT for the whole window, the pad
+             * only from `ln` frames in, so stock always sees SHIFT well before the pad, as with a hand (0.2.13: it used to be
+             * one frame, ~1 ms on the deck). The window is rpf + ln frames, at most 250 (8-bit heartbeat). */
+            unsigned age = (unsigned)(uint8_t)(hb - FS.rp_t0[s]);
+            if (age < rpf + ln) {
+                frame[SO[s].sh_o] |= shm;
+                if (age >= ln) frame[SO[s].pad_o] |= FS.rp[s];
             } else FS.rp[s] = 0;
         }
         if (FS.rp[2 + s]) {
             if (!dl && (unsigned)((uint8_t)(hb - FS.dh_t0[s])) < rpf) frame[SO[s].del_o] |= (unsigned char)(1u << SO[s].del_b);
             else FS.rp[2 + s] = 0;
         }
-        /* SHIFT leads the pad by one frame whenever the filter (not the player's finger) raises SHIFT: a real
-         * SHIFT+pad always arrives SHIFT first, and stock may decode both bits of one frame in either order
-         * (0.2.8 al028c: the first DELETE+pad after a quiet period acted as a plain pad + DELETE). */
-        if (lead && !sh) {
-            if (!FS.sl[s]) {
-                FS.sl[s] = 1;
-                unsigned char m = 0;
-                if (lead & 1) m |= (unsigned char)(padr & ~pe);   /* pad bits that rose on this very frame */
-                if (lead & 2) m |= FS.rp[s];                    /* a replay that starts now */
-                frame[SO[s].pad_o] &= (unsigned char)~m;        /* this frame: SHIFT only; the pad follows on the next */
-            }
-        } else FS.sl[s] = 0;
     }
     __atomic_store_n(&FS.snap, sn, __ATOMIC_RELAXED);   /* the one published store */
 }
@@ -1119,7 +1144,7 @@ static void prewarm_filter(void)
     unsigned char f[ERP_LEN];
     uint32_t keep = FS.cfg;
     FS.cfg = CFG_ENABLE | CFG_CLEAR | CFG_HOTCUE;
-    FS.rp_frames = 4;
+    FS.rp_frames = 4; FS.lead_frames = 1;
     FS.snap = 255ull << 56;                   /* the first call lands on heartbeat 0: the timed path runs too */
     for (int rep = 0; rep < 3; rep++)
         for (int step = 0; step < 16; step++) {
@@ -1141,8 +1166,8 @@ static void prewarm_filter(void)
     FS.snap = 0; FS.prev = 0; FS.cfg = keep;
     FS.stamp = 0; FS.last_t = 0; FS.fmax = 0; FS.fover = 0; FS.fover2 = 0; FS.gmax = 0; FS.gover = 0; FS.tap = 0; FS.tapx = 0; FS.dlp = 0; FS.dle = 0; FS.nedge = 0;
     FS.fi = 0; FS.fn = 0; FS.emp = 0; memset(FS.pe, 0, sizeof FS.pe);
-    FS.rp_frames = 12; memset(FS.rp, 0, sizeof FS.rp); memset(FS.rp_t0, 0, sizeof FS.rp_t0); memset(FS.dh, 0, sizeof FS.dh);
-    memset(FS.du, 0, sizeof FS.du); memset(FS.dh_t0, 0, sizeof FS.dh_t0);
+    FS.rp_frames = 12; FS.lead_frames = 1; memset(FS.rp, 0, sizeof FS.rp); memset(FS.rp_t0, 0, sizeof FS.rp_t0); memset(FS.dh, 0, sizeof FS.dh);
+    memset(FS.du, 0, sizeof FS.du); memset(FS.dh_t0, 0, sizeof FS.dh_t0); memset(FS.hd, 0, sizeof FS.hd);
     FS.req = 0;
 }
 
@@ -2590,6 +2615,7 @@ static void mem_gone(int d, int i)
 static void on_delete_ev(ev_t *e)
 {
     if (!row_on()) return;                               /* row off: silent */
+    if (e->kind >= 1 && e->kind <= 8) dlp_got = 1;      /* 0.2.13: a hot cue delete reached the firmware (confirms a DELETE+pad) */
     if (!e->draw || e->kind < 0 || e->kind > 8) return;
     int loop = raw_loop(e->din, e->dout);
     LOGC("deleteCue seen: kind %d loop=%d at in=%lld out=%lld", e->kind, loop, (long long)e->din,
@@ -3417,6 +3443,14 @@ static uint32_t rate_frames(uint64_t fi, uint64_t hz)
     uint64_t n = (hz / 25u + fi / 2u) / fi;
     return (uint32_t)(n < 6 ? 6 : n > 200 ? 200 : n);
 }
+/* 0.2.13: frames for `ms` milliseconds at the typical interval fi (ticks of hz), at least 1 (the emulator's ~17 frames/s: one
+ * frame is already 60+ ms), at most 120 */
+static uint32_t rate_lead(uint64_t fi, uint64_t hz, uint32_t ms)
+{
+    if (!fi || !hz) return 1;
+    uint64_t n = (hz * ms / 1000u + fi / 2u) / fi;
+    return (uint32_t)(n < 1 ? 1 : n > 120 ? 120 : n);
+}
 static void poll_filter(void)
 {
     uint64_t sn = __atomic_load_n(&FS.snap, __ATOMIC_RELAXED);
@@ -3447,10 +3481,12 @@ static void poll_filter(void)
             uint32_t n = rate_frames(fi, cnt_hz);
             double fps = (double)cnt_hz / (double)fi;
             if (n != FS.rp_frames) __atomic_store_n(&FS.rp_frames, n, __ATOMIC_RELAXED);
+            uint32_t ln = rate_lead(fi, cnt_hz, lead_ms);
+            if (ln != FS.lead_frames) __atomic_store_n(&FS.lead_frames, ln, __ATOMIC_RELAXED);
             if ((cfg & CFG_ENABLE) && (!fr_logged || fps < fr_last * 0.9 || fps > fr_last * 1.1)) {
                 double lim = 3.0 * fi; if (lim < (double)FS.gthr) lim = (double)FS.gthr;
-                LOG("ERP frame rate %.0f/s (typical interval %.1f ms): SHIFT+pad / DELETE replay = %u frames (40 ms), a stall = a gap over %.1f ms (3x the interval)",
-                    fps, 1e3 / fps, n, lim * 1e3 / (double)cnt_hz);
+                LOG("ERP frame rate %.0f/s (typical interval %.1f ms): SHIFT+pad / DELETE replay = %u frames (40 ms), SHIFT leads a synthesized SHIFT+pad by %u frames (%u ms), a stall = a gap over %.1f ms (3x the interval)",
+                    fps, 1e3 / fps, n, ln, lead_ms, lim * 1e3 / (double)cnt_hz);
                 fr_logged = 1; fr_last = fps;
             }
         }
@@ -3461,8 +3497,18 @@ static void poll_filter(void)
         if ((dp >> 16) != (dlp_seen >> 16)) {
             unsigned n = ((dp >> 16) - (dlp_seen >> 16)) & 0xffffu;
             dlp_seen = dp;
-            if (cfg & CFG_ENABLE) LOG("filter: DELETE+pad %u seen (last: side %u pad %u), sent to stock as SHIFT+pad", n, (dp >> 8) & 1u, dp & 0xffu);
+            if (cfg & CFG_ENABLE) LOG("filter: DELETE+pad %u seen (last: side %u pad %u), sent to stock as SHIFT+pad (SHIFT first, %u ms ahead)", n, (dp >> 8) & 1u, dp & 0xffu, lead_ms);
+            dlp_wait_ns = now_ns(); dlp_got = 0;
         }
+        /* 0.2.13: a DELETE+pad that stock did not take (no hot cue deleteCue within 0.8 s: an empty pad whose emptiness the tick did not know yet, or
+         * the deck did not read SHIFT+pad) says so in the log, and the next one leads with SHIFT for twice as long (40 -> 80 -> 160 ms). */
+        if (dlp_wait_ns && !dlp_got && now_ns() - dlp_wait_ns > 800000000ull) {
+            dlp_wait_ns = 0;
+            if (cfg & CFG_ENABLE) {
+                if (lead_ms < LEAD_MS_MAX) lead_ms *= 2;
+                LOG("DELETE+pad: no hot cue delete followed within 0.8 s (empty pad, or stock did not take SHIFT+pad): SHIFT now leads by %u ms", lead_ms);
+            }
+        } else if (dlp_got) dlp_wait_ns = 0;
         static uint32_t dle_seen;
         uint32_t de = __atomic_load_n(&FS.dle, __ATOMIC_RELAXED);
         if ((de >> 16) != (dle_seen >> 16)) {
@@ -3809,7 +3855,7 @@ static int init(const az_core_v1 *core)
     tk_row_was = row_on();       /* 0.2.8: a start with the row off is silent; only a toggle is logged */
     memset(ring, 0, sizeof ring);                 /* pre-touch: no first-use page fault in a hook */
     __atomic_store_n(&al_live, 1, __ATOMIC_RELEASE);
-    LOG("loaded 0.2.12; filter: SHIFT+MEMORY/DELETE, SHIFT+pad arm+save when nothing of yours is lost (second press off), red pad, DELETE+pad (+ our own saved copy); deleteCue observer; template-free ANLZ build, flags at parse, wait-free filter/hot path, updatable toast (%s); setout=%d",
+    LOG("loaded 0.2.13; filter: SHIFT+MEMORY/DELETE, SHIFT+pad arm+save when nothing of yours is lost (second press off), red pad, DELETE+pad (+ our own saved copy); deleteCue observer; template-free ANLZ build, flags at parse, wait-free filter/hot path, updatable toast (%s); setout=%d",
         tsurf ? "surface" : "banner queue", orig_setout != NULL);
     return 0;
 }

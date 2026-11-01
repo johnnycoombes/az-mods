@@ -7,13 +7,13 @@
     {
       "id": "active-loop",
       "name": "Active Loop Picker",
-      "version": "0.2.12",
+      "version": "0.2.13",
       "author": "JC",
       "summary": "Pick any stored loop as Active; saved with a red pad when none of yours is lost; auto-advance on exit.",
-      "icon": "https://github.com/johnnycoombes/az-mods/releases/download/active-loop-0.2.12/active-loop-0.2.12-icon.png",
-      "package": "https://github.com/johnnycoombes/az-mods/releases/download/active-loop-0.2.12/active-loop-0.2.12.azmod",
-      "sha256": "acec62ae08fbde2899bcb3fa3165153f727e9c2110b591d5fc10f4f6e1001ad2",
-      "size": 153174,
+      "icon": "https://github.com/johnnycoombes/az-mods/releases/download/active-loop-0.2.13/active-loop-0.2.13-icon.png",
+      "package": "https://github.com/johnnycoombes/az-mods/releases/download/active-loop-0.2.13/active-loop-0.2.13.azmod",
+      "sha256": "67323ce3b5dd598023d8fa5a05e5fbd0b5b9e83286adea308c1ff8e2148fe638",
+      "size": 149086,
       "firmware": [
         "ep147-9e9454e357389ece"
       ],

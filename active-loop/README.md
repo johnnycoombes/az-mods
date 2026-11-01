@@ -11,12 +11,18 @@ Community mod for AZ-MODS on the Pioneer XDJ-AZ (EP147 2.00 / 2.01).
 | **SHIFT + pad** on a hot cue that holds a **loop**, first press | Arm that loop as the Active Loop and, **when no loop of yours would be lost**, save it (0.2.9/0.2.10): the pad turns **red** and a memory loop with the Active Loop flag is stored by the deck's own software. The pad press is eaten, so the stock delete does **not** run; the strip says *Active Loop saved: hot cue at ...*, or why it only armed it (see 0.2.10). |
 | **SHIFT + the armed pad** again | Active Loop **off**: it is cleared. A saved copy **this mod made and confirmed** is deleted; a saved flag on any other loop **stays** (the strip says so). The normal hot cue loop stays. |
 | **SHIFT + pad** on a hot cue that is a **point** | Passed to stock (replayed for 40 ms): the point cue is deleted, as without the mod. |
-| **DELETE + pad** (hold DELETE, press the pad) | Delete that hot cue, loop or point. The mod sends the pad to stock as SHIFT+pad. If it was the Active Loop, the Active Loop is cleared, and a saved copy this mod made and confirmed is deleted with it (any other memory loop stays). |
+| **DELETE + pad** (hold DELETE, press the pad) | Delete that hot cue, loop or point. The mod sends the pad to stock as SHIFT+pad (0.2.13: SHIFT first, 40 ms ahead, then the pad for 40 ms). If it was the Active Loop, the Active Loop is cleared, and a saved copy this mod made and confirmed is deleted with it (any other memory loop stays). |
 | **DELETE** alone (tap) | Stock DELETE (memory cue), replayed a few milliseconds late when you release it. Deleting the memory loop that is the Active Loop clears the Active Loop too. |
 | **SHIFT + pad** in sampler, keyboard or any other pad mode | The mod treats the pad as a hot cue pad. A pad that is not a loop is replayed to stock, so it still does what stock does; only a pad that holds a hot cue **loop** is armed instead. Since al028d a pad whose hot cue slot is **empty** is swallowed (SHIFT+pad and DELETE+pad) unless the core reports BEAT LOOP or SLIP LOOP mode; the core cannot tell sampler, keyboard, HOT CUE and BEAT JUMP apart, so there SHIFT+empty pad does nothing. |
 | Mod row off, or the core has switched the frame filter off | Everything above is stock. **SHIFT+pad then deletes a hot cue, a loop too**, as it always did. |
 
 SHIFT+CALL is not used by the mod. (Earlier notes said stock doubles/halves the loop with it. Correction: stock CALL picks double or half from the loop state, not from SHIFT.)
+
+## 0.2.13 - DELETE + pad works on the deck
+
+Holding DELETE and pressing a hot cue pad (a loop pad too) removed nothing on the real deck in 0.2.12, and because SHIFT+pad on a loop pad *arms* it instead of deleting it, the pad could not be removed at all. The mod turns DELETE+pad into SHIFT+pad for stock, and it used to put the SHIFT bit one input frame ahead of the pad. One frame is 60 ms or more on the emulator (17 frames/s, where every test passed) but about 1 ms on the deck (about 1000 frames/s), so stock saw SHIFT and the pad at the same instant. Now the pad pressed under DELETE is eaten and sent as a proper SHIFT+pad: **SHIFT alone for 40 ms, then SHIFT+pad for 40 ms, then both up** (one frame ahead at the emulator's rate, as before). A quick tap is delivered whole. A plain pad pressed in the 80 ms after a DELETE+pad is held back until the mod's SHIFT is gone, so it can never be read as SHIFT+pad. If a DELETE+pad is not followed by a hot cue delete within 0.8 s, the log says so and the next one leads by twice as long (80, then 160 ms). The SHIFT+pad replay for a point cue uses the same lead. Nothing else changed.
+
+**If a pad still will not delete:** switch the mod off in the Mod Menu (Active Loop row), delete the pad with stock SHIFT+pad, and switch it back on; or delete it in rekordbox.
 
 ## 0.2.12 - slower, and all the way out
 

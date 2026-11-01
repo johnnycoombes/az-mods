@@ -70,15 +70,16 @@ int main(void){
     idl[0]=1; step(); ipad[0]=4; step();
     assert(!HAS_DL(0) && HAS_SH(0) && PAD(0)==0);      /* SHIFT leads the pad by one frame */
     step(); assert(!HAS_DL(0) && HAS_SH(0) && PAD(0)==4);
-    ipad[0]=0; step(); assert(!HAS_SH(0) && !HAS_DL(0));
+    ipad[0]=0; step(); assert(HAS_SH(0) && PAD(0)==4 && !HAS_DL(0));   /* finger up: the replay still delivers the whole press (0.2.13) */
+    expire(); assert(!HAS_SH(0) && PAD(0)==0 && !HAS_DL(0));
     idl[0]=0; step();                                    /* DELETE released after a pad: NO tap */
     assert(!HAS_DL(0) && !FS.rp[2] && !FS.rp[0]);
     /* ... pad released after DELETE: same */
     idl[0]=1; step(); ipad[0]=128; step(); assert(HAS_SH(0) && PAD(0)==0); step(); assert(HAS_SH(0) && PAD(0)==128);
-    idl[0]=0; step(); assert(PAD(0)==128 && !HAS_SH(0) && !HAS_DL(0));
-    ipad[0]=0; step(); assert(!FS.rp[2] && !HAS_DL(0));
+    idl[0]=0; step(); assert(PAD(0)==128 && HAS_SH(0) && !HAS_DL(0));   /* DELETE up first: the press is still being delivered, no DELETE leaks */
+    ipad[0]=0; step(); assert(!FS.rp[2] && !HAS_DL(0)); expire(); idle();
     /* DELETE+pad on B */
-    idl[1]=1; step(); ipad[1]=2; step(); assert(HAS_SH(1) && PAD(1)==0 && !HAS_DL(1)); step(); assert(HAS_SH(1) && PAD(1)==2 && !HAS_DL(1)); idle();
+    idl[1]=1; step(); ipad[1]=2; step(); assert(HAS_SH(1) && PAD(1)==0 && !HAS_DL(1)); step(); assert(HAS_SH(1) && PAD(1)==2 && !HAS_DL(1)); idle(); expire(); idle();
     /* a pad pressed first, DELETE after: stock sees the pad plain, DELETE still eaten */
     ipad[0]=1; step(); idl[0]=1; step(); assert(!HAS_DL(0)); idle(); expire(); idle();
 
@@ -102,7 +103,8 @@ int main(void){
     /* replay while the physical SHIFT is still held and the pad was eaten */
     idle(); ish[0]=1; step(); ipad[0]=1; step(); assert(PAD(0)==0);
     FS.req = RQ_VALID | 0x01u; step();
-    assert(PAD(0)==1 && HAS_SH(0));
+    assert(PAD(0)==0 && HAS_SH(0));                      /* 0.2.13: the replayed pad follows the lead (1 frame here) */
+    step(); assert(PAD(0)==1 && HAS_SH(0));
     expire(); idle();
 
     /* row off (CFG_ENABLE clear): total pass-through, even with DELETE+pad / SHIFT+pad */
@@ -178,7 +180,7 @@ int main(void){
       assert(FS.tap == tp0 && FS.tapx == tx0 + 2 && !HAS_DL(0)); idle();
       idl[0]=1; step(); step(); idl[0]=0; step();                                      /* no stall: still a tap */
       assert((FS.tap >> 16) == (tp0 >> 16) + 1 && HAS_DL(0)); expire(); idle(); }
-    { uint32_t d0 = FS.dlp; idl[1]=1; step(); ipad[1]=16; step(); assert((FS.dlp >> 16) == (d0 >> 16) + 1 && ((FS.dlp >> 8) & 1) == 1 && (FS.dlp & 0xff) == 5); idle(); }
+    { uint32_t d0 = FS.dlp; idl[1]=1; step(); ipad[1]=16; step(); assert((FS.dlp >> 16) == (d0 >> 16) + 1 && ((FS.dlp >> 8) & 1) == 1 && (FS.dlp & 0xff) == 5); idle(); expire(); idle(); }
     { uint32_t e0 = FS.nedge; for (int i=0;i<500;i++) step(); assert(FS.nedge == e0);   /* idle frames never take the full path */
       ipad[0]=1; step(); assert(FS.nedge > e0); idle(); }
 
@@ -201,11 +203,11 @@ int main(void){
       ipad[0]=0; step(); assert(PAD(0)==0 && !HAS_DL(0)); idle();
       /* a pad that is NOT in the mask under DELETE is still DELETE+pad (SHIFT lead, then SHIFT+pad) */
       idl[0]=1; step(); ipad[0]=4; step(); assert(PAD(0)==0 && HAS_SH(0)); step(); assert(PAD(0)==4 && HAS_SH(0) && FS.dlp != d0);
-      ipad[0]=0; idl[0]=0; step(); idle();
+      ipad[0]=0; idl[0]=0; step(); idle(); expire(); idle();
       idl[1]=1; step(); ipad[1]=16; step(); assert(PAD(1)==0 && !HAS_SH(1) && (FS.dle & 0xff) == 5 && ((FS.dle >> 8) & 1) == 1);
       ipad[1]=0; idl[1]=0; step(); idle();
       FS.emp = 0;                                                         /* unknown (tick not run yet): the old behaviour */
-      idl[0]=1; step(); ipad[0]=2; step(); assert(HAS_SH(0)); idle(); }
+      idl[0]=1; step(); ipad[0]=2; step(); assert(HAS_SH(0)); idle(); expire(); idle(); }
     /* (12) al028d: the stall test follows the frame interval (17 / 125 / 1000 frames/s on a virtual clock: see filter_fuzz) */
     { uint64_t fi0 = FS.fi; assert(FS.fn >= FI_MIN && fi0 > 0 && FS.gthr > 0); }
 

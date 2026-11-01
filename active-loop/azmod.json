@@ -2,7 +2,7 @@
   "azmod": 1,
   "id": "active-loop",
   "name": "Active Loop Picker",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "author": "JC",
   "summary": "Pick any stored loop as Active; saved with a red pad when none of yours is lost; auto-advance on exit.",
   "description": "Pick which stored loop is the Active Loop, with no playhead jump; it engages by itself when the playhead reaches it. At load the loop marked Active in rekordbox is armed. SHIFT+MEMORY cycles loops ahead. SHIFT+pad on a hot cue loop arms it and, if no loop of yours would be lost, saves it as the track's Active Loop and turns the pad red, and the armed pad breathes; SHIFT+the pad again turns it off. The mod only deletes a saved copy it made itself. Reads analysis files read-only. Firmware 2.00/2.01 only. Settings in its Mod Menu page.",
