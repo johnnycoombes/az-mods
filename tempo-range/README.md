@@ -144,7 +144,7 @@ so `claim_hook` should accept the address. Confirm in the mod log after load:
 - **Quantiser mismatch** if `N×step ≠ mult` — this mod keeps them equal.
 - **Scale art mismatch** — cosmetic, but easy to misread on stage.
 - **Link / SYNC** — followers track the new pitch; that is intended.
-- Beta: tested on JC's XDJ-AZ (fw 2.00/2.01) and on the emulator for 0.1.15. Still marked BETA.
+- Tested on JC's XDJ-AZ (fw 2.00/2.01) and on the emulator for 0.1.15.
 
 ## If playback does not follow
 

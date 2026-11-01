@@ -18,6 +18,14 @@ Community mod for AZ-MODS on the Pioneer XDJ-AZ (EP147 2.00 / 2.01).
 
 SHIFT+CALL is not used by the mod. (Earlier notes said stock doubles/halves the loop with it. Correction: stock CALL picks double or half from the loop state, not from SHIFT.)
 
+## 0.2.12 - slower, and all the way out
+
+The breath of the **armed** pad now takes **4 seconds** per cycle and fades from full red all the way to **off** (the pad's colour goes to zero) and back. The curve leaves black quickly, so the pad is dark only for a brief moment (about a quarter of a second at the bottom) and reads as lit the rest of the time. Saved-but-not-armed pads stay solid red; **Pulse armed pad** off = solid red. Nothing else changed.
+
+## 0.2.11 - the armed pad breathes
+
+The pad of the **armed** Active Loop fades smoothly between full red and a dim red that stays clearly lit, one cycle about every 2 seconds (0.2.12: 4 s, down to off, see above). A loop that is only **saved** (flagged, not armed) stays solid red. Only the pad's colour in the LED frame changes: the tick works out the level from the monotonic clock and publishes one byte; the LED callback reads that byte. Mod Menu: **Pulse armed pad** (default on; off = solid red as in 0.2.10). Nothing else changed: every 0.2.10 rule stands.
+
 ## 0.2.10 - nothing of yours is ever deleted
 
 AZ-EMU found that 0.2.9 could delete one of your own memory loops. The firmware (read from the deck software) works like this:

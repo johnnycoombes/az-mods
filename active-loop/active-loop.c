@@ -1,6 +1,19 @@
 /* SPDX-License-Identifier: GPL-3.0-only
  *
- * active-loop 0.2.10 — Active Loop Picker for EP147 (XDJ-AZ 2.00/2.01).
+ * active-loop 0.2.12 — Active Loop Picker for EP147 (XDJ-AZ 2.00/2.01).
+ *
+ * 0.2.12: the breath is slower and goes all the way out. One cycle is 4 s (was 2 s) and the armed pad fades from full red (FF0000)
+ *        down to OFF (red byte 0, the whole cell 00 00 00) and back, instead of stopping at a dim red. The curve is shaped so the pad
+ *        spends only a brief moment dark (red byte 0 about 6% of a cycle, 0.24 s; 2 or less about 11%, 0.44 s) and reads as lit the
+ *        rest of the time. Only led_level_update() changed (period, shape, floor 0); on_led and everything else are as 0.2.11.
+ *
+ * 0.2.11: the ARMED Active Loop pad BREATHES. Its red fades smoothly between full red (FF0000) and a dim red that stays clearly lit,
+ *        one cycle every 2 s. Pads that are only saved (flagged, not armed) stay solid red. The breath is the LED frame's colour
+ *        only: the tick reads CLOCK_MONOTONIC, shapes a raised cosine and a gamma curve (LED bytes are linear light), and publishes
+ *        ONE byte (led_lvl, atomic); on_led only reads that byte and writes the armed pad's red channel. No clock, call, lock or
+ *        log is added to the LED path, and the input filter is untouched. New Mod Menu row "Pulse armed pad" (default ON; off =
+ *        solid red as 0.2.10). Nothing else changed: every 0.2.10 rule (never delete a loop we did not store and confirm,
+ *        no writes to the deck/stick, ownership read-back) is as it was. HOT CUE gating and the stock dim-cell rule are as before.
  *
  * 0.2.10 (AZ-EMU al029a round: the firmware ignored a same-extent store and DELETES the old flagged loop on a new flag):
  *        The mod now NEVER deletes a memory loop it did not store itself in this session and confirm in the ANLZ read-back.
@@ -235,6 +248,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <time.h>
+#include <math.h>
 #include <fcntl.h>
 
 #include "azmod-mod.h"
@@ -499,9 +513,10 @@ static uint64_t now_ns(void)
 
 static int h_autoadv = -1, h_rearm = -1;
 static int h_enable = -1;
+static int h_pulse = -1;                    /* 0.2.11: Mod Menu row "Pulse armed pad" */
 static uint32_t cfg_bits = (1u) | (0u << 1) | (1u << 3) | (1u << 4) | (1u << 5);
 enum { CFG_ENABLE = 1u << 0, CFG_HOTCUE = 1u << 3, CFG_CLEAR = 1u << 4, CFG_TOAST = 1u << 5,
-       CFG_AUTOADV = 1u << 6, CFG_REARM = 1u << 7 };
+       CFG_AUTOADV = 1u << 6, CFG_REARM = 1u << 7, CFG_PULSE = 1u << 8 };
 static int cfg_combo_val(uint32_t b) { return (int)((b >> 1) & 3u); }
 
 enum { COMBO_SHIFT_MEMORY = 0, COMBO_OFF_PADS = 1, COMBO_PAD_ONLY = 2, NCOMBO = 3 };
@@ -2640,24 +2655,52 @@ static void emp_refresh(void)
  * goes away the pad has its own colour again at the very next frame. */
 static int red_extent(int d, int64_t *in, int64_t *out)
 {
-    if (act_ok[d] && !spent[d]) { *in = active_in[d]; *out = active_out[d]; return 1; }
+    if (act_ok[d] && !spent[d]) { *in = active_in[d]; *out = active_out[d]; return 2; }    /* 2 = ARMED (0.2.11: it breathes) */
     int i = flagged_idx(d);
     if (i >= 0) { *in = cue_in(mem_buf[d][i]); *out = cue_out(mem_buf[d][i]); return 1; }
     return 0;
 }
 static uint32_t led_pub[2];                 /* atomic: bit k-1 = pad k of that side is red */
+static uint32_t led_arm[2];                 /* atomic, 0.2.11: the subset of led_pub that is the ARMED Active Loop (breathes) */
+static uint32_t led_lvl = 255;              /* atomic, 0.2.11: the red byte of a breathing pad, published by the tick */
 static void led_refresh(void)
 {
     for (int s = 0; s < 2; s++) {
-        int d = side_to_deck(s); uint32_t m = 0; int64_t in, out;
-        if (holder_of(d) && red_extent(d, &in, &out))
+        int d = side_to_deck(s); uint32_t m = 0, am = 0; int64_t in, out; int re;
+        if (holder_of(d) && (re = red_extent(d, &in, &out)) != 0)
             for (int k = 1; k <= 8; k++)
-                if (hot_ok[d][k] && fw_is_loop(hot_buf[d][k]) && ext_loose(hot_buf[d][k], in, out)) m |= 1u << (k - 1);
+                if (hot_ok[d][k] && fw_is_loop(hot_buf[d][k]) && ext_loose(hot_buf[d][k], in, out)) {
+                    m |= 1u << (k - 1);
+                    if (re == 2) am |= 1u << (k - 1);
+                }
+        if (am != __atomic_load_n(&led_arm[s], __ATOMIC_RELAXED)) __atomic_store_n(&led_arm[s], am, __ATOMIC_RELAXED);
         if (m != __atomic_load_n(&led_pub[s], __ATOMIC_RELAXED)) {
             __atomic_store_n(&led_pub[s], m, __ATOMIC_RELAXED);
             LOGC("deck %d (side %d): red pads mask %02x", d + 1, s + 1, m);
         }
     }
+}
+/* 0.2.12: the breath. Tick only (UI thread). Phase from CLOCK_MONOTONIC (the tick rate varies: never count ticks), raised cosine
+ * w = 0.5 - 0.5 cos(2 pi phase) (0 at phase 0 = OFF, 1 at half a cycle = full red). PERCEIVED level p = w^0.6: the exponent lifts the
+ * bottom so the fade leaves black quickly and the pad does not sit dark (a plain cosine would be byte 0 for ~16% of the cycle; this
+ * is ~6%), while the top stays flat and smooth. LED byte = p^2.2 (the frame is linear light, so equal steps of p look like equal
+ * steps of brightness). The floor is 0: the red byte reaches 0 and the cell is 00 00 00 there. Pulse row off: constant 255 = the
+ * 0.2.10 solid red. Levels by tenth of the cycle: 0 11 63 146 223 255 223 146 63 11 0. */
+#define BREATH_PERIOD_NS 4000000000ull
+#define BREATH_SHAPE     0.6f
+static void led_level_update(uint32_t cf)
+{
+    uint32_t lv = 255;
+    if (cf & CFG_PULSE) {
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t t = ((uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec) % BREATH_PERIOD_NS;
+        float ph = (float)t / (float)BREATH_PERIOD_NS;
+        float w = 0.5f - 0.5f * cosf(6.2831853f * ph);
+        float p = powf(w, BREATH_SHAPE);
+        int v = (int)(powf(p, 2.2f) * 255.0f + 0.5f);
+        lv = (uint32_t)(v < 0 ? 0 : v > 255 ? 255 : v);
+    }
+    if (lv != __atomic_load_n(&led_lvl, __ATOMIC_RELAXED)) __atomic_store_n(&led_lvl, lv, __ATOMIC_RELAXED);
 }
 /* LED frame (128 bytes, CRC restamped by the core): side s at +s*0x38, pad k (0..7) = 4-byte cell {R,G,B,0} at 0x1e + 4k, pad-mode
  * buttons at 0x0e + 4j (j 0 = HOT CUE). Linear light: red is FF0000. Only while HOT CUE is the lit mode button (full brightness,
@@ -2674,6 +2717,8 @@ static int on_led(int bus, unsigned char *f, int len)
     for (int s = 0; s < 2; s++) {
         uint32_t m = __atomic_load_n(&led_pub[s], __ATOMIC_RELAXED);
         if (!m) { led_sig[s] = 0; continue; }
+        const uint32_t am = __atomic_load_n(&led_arm[s], __ATOMIC_RELAXED);      /* 0.2.11: armed pads breathe */
+        const unsigned char lvl = (unsigned char)__atomic_load_n(&led_lvl, __ATOMIC_RELAXED);
         const unsigned char *mb = f + LED_MODE_OFF + s * LED_SIDE;
         unsigned mx = mb[0] > mb[1] ? mb[0] : mb[1]; if (mb[2] > mx) mx = mb[2];
         int lime = mb[1] >= mb[0] && mb[2] == 0 && mb[0] > 0 && mb[0] < mb[1];
@@ -2686,7 +2731,7 @@ static int on_led(int bus, unsigned char *f, int len)
                 unsigned cm = c[0] > c[1] ? c[0] : c[1]; if (c[2] > cm) cm = c[2];
                 if (!cm) continue;
                 if (first < 0) { first = k; was[0] = c[0]; was[1] = c[1]; was[2] = c[2]; }
-                c[0] = cm >= 0x40 ? 0xff : 12; c[1] = 0; c[2] = 0;
+                c[0] = cm >= 0x40 ? (((am >> k) & 1u) ? lvl : 0xff) : 12; c[1] = 0; c[2] = 0;
             }
         }
         /* evidence for the emulator run (it has no LEDs): one queued line per change of what is painted (at most 24 per session) */
@@ -2854,11 +2899,12 @@ static void watch_loops(void)
  * are always on while Active Loop is on. */
 static void sync_cfg(void)
 {
-    uint32_t b = CFG_ENABLE | CFG_HOTCUE | CFG_CLEAR | CFG_TOAST | CFG_REARM | CFG_AUTOADV;
+    uint32_t b = CFG_ENABLE | CFG_HOTCUE | CFG_CLEAR | CFG_TOAST | CFG_REARM | CFG_AUTOADV | CFG_PULSE;
     if (AZ_HAS(C, row_value)) {
         if (h_enable >= 0 && C->row_value(h_enable) != 1) b &= ~CFG_ENABLE;
         if (h_autoadv >= 0 && C->row_value(h_autoadv) != 1) b &= ~CFG_AUTOADV;
         if (h_rearm >= 0 && C->row_value(h_rearm) != 1) b &= ~CFG_REARM;
+        if (h_pulse >= 0 && C->row_value(h_pulse) != 1) b &= ~CFG_PULSE;
     }
     b |= ((uint32_t)COMBO_SHIFT_MEMORY & 3u) << 1;
     __atomic_store_n(&cfg_bits, b, __ATOMIC_RELAXED);
@@ -3526,6 +3572,7 @@ static void my_tick(void)
         pend_service();                      /* applies the one clear queued above, silently */
         pj_service();                        /* 0.2.9: a persist pair already started is finished (never half a delete + store) */
         __atomic_store_n(&led_pub[0], 0u, __ATOMIC_RELAXED); __atomic_store_n(&led_pub[1], 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&led_arm[0], 0u, __ATOMIC_RELAXED); __atomic_store_n(&led_arm[1], 0u, __ATOMIC_RELAXED);
         for (int d = 0; d < NDECK; d++) {
             __atomic_store_n(&hold_pub[d], holder_of(d), __ATOMIC_RELAXED);
             __atomic_store_n(&arm_in[d], INT64_MAX, __ATOMIC_RELAXED);
@@ -3548,6 +3595,7 @@ static void my_tick(void)
     pv_service();
     anlz_service();
     led_refresh();
+    led_level_update(cf0);
     timing_log();
     for (int d = 0; d < NDECK; d++) {
         __atomic_store_n(&hold_pub[d], holder_of(d), __ATOMIC_RELAXED);
@@ -3716,6 +3764,13 @@ static int init(const az_core_v1 *core)
             .on_change = row_changed, .user = (void *)"Re-arm",
         };
         h_rearm = C->register_row(MOD_ID, &ra);
+        const az_row_v1 pu = {
+            .size = sizeof pu, .key = "pulse", .label = "Pulse armed pad",
+            .kind = AZ_ROW_TOGGLE, .flags = AZ_ROW_DEFAULT_ON, .parent = "enable",
+            .help = "The armed Active Loop pad breathes (full red fades to off, 4 s). Off: solid red.",
+            .on_change = row_changed, .user = (void *)"Pulse armed pad",
+        };
+        h_pulse = C->register_row(MOD_ID, &pu);
     }
 
     {
@@ -3754,7 +3809,7 @@ static int init(const az_core_v1 *core)
     tk_row_was = row_on();       /* 0.2.8: a start with the row off is silent; only a toggle is logged */
     memset(ring, 0, sizeof ring);                 /* pre-touch: no first-use page fault in a hook */
     __atomic_store_n(&al_live, 1, __ATOMIC_RELEASE);
-    LOG("loaded 0.2.10; filter: SHIFT+MEMORY/DELETE, SHIFT+pad arm+save when nothing of yours is lost (second press off), red pad, DELETE+pad (+ our own saved copy); deleteCue observer; template-free ANLZ build, flags at parse, wait-free filter/hot path, updatable toast (%s); setout=%d",
+    LOG("loaded 0.2.12; filter: SHIFT+MEMORY/DELETE, SHIFT+pad arm+save when nothing of yours is lost (second press off), red pad, DELETE+pad (+ our own saved copy); deleteCue observer; template-free ANLZ build, flags at parse, wait-free filter/hot path, updatable toast (%s); setout=%d",
         tsurf ? "surface" : "banner queue", orig_setout != NULL);
     return 0;
 }
