@@ -8,7 +8,7 @@ int main(int argc, char **argv){
     for (size_t k = 0; k < g.gl_pathc; k++) {
         al_t e[NAL]; int n = 0, fl = 0;
         long len = slurp(g.gl_pathv[k], anlz_buf, sizeof anlz_buf);
-        if (len <= 0 || anlz_loops(anlz_buf, len, e, NAL, &n) != 0 || !n) continue;
+        if (len <= 0 || anlz_loops(anlz_buf, len, e, NAL, &n, NULL) != 0 || !n) continue;
         al_dedup(e, &n);
         for (int i = 0; i < n; i++) fl += e[i].flag;
         files++; one += fl == 1;

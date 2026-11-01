@@ -6,7 +6,7 @@ Built with the [AZ-MODS SDK](https://github.com/Kyle-Hosman/az-mods-sdk) v1.2.3 
 
 | Mod | Folder | What it changes |
 |---|---|---|
-| Active Loop Picker (`active-loop`) | [active-loop/](active-loop/) | Arms the rekordbox Active Loop (or the next stored loop) at track load so it engages when the playhead reaches it; SHIFT+MEMORY cycles loops; optional Auto-advance. Reads the stick's analysis files, never writes them. **Patches the deck software's code.** |
+| Active Loop Picker (`active-loop`) | [active-loop/](active-loop/) | Arms the rekordbox Active Loop (or the next stored loop) at track load so it engages when the playhead reaches it; SHIFT+MEMORY jumps to the next loop; SHIFT+pad arms a hot cue loop as the Active Loop and saves it (red pad) through the deck's own software, DELETE+pad deletes a loop; optional Auto-advance. Reads the stick's analysis files read-only and writes no file itself. **Patches the deck software's code.** |
 | Custom Tempo Range (`tempo-range`) | [tempo-range/](tempo-range/) | Remaps the TEMPO RANGE slots ±6/10/16 to ±4/8/16 (WIDE stays ±100%) on all four decks and draws the BPM with two decimals. **Patches the deck software's code.** Turn the `bpm2dp` mod off while it is on. |
 
 Both mods are **BETA** and support **firmware 2.00/2.01 only** (`ep147-9e9454e357389ece`); the deck
@@ -27,7 +27,7 @@ azmod-pack build active-loop      # or tempo-range
 make -C active-loop test AZ_SDK=/path/to/az-mods-sdk
 ```
 
-Releases are built by `.github/workflows/release-<id>.yml` when a tag `<id>-<version>` is pushed.
+Releases are built with `azmod-pack build` in the SDK container (`az-mods-sdk:1`) and attached to a GitHub release by hand.
 
 ## License
 

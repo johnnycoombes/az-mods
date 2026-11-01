@@ -1,7 +1,98 @@
 /* SPDX-License-Identifier: GPL-3.0-only
  *
- * active-loop 0.2.7 — Active Loop Picker for EP147 (XDJ-AZ 2.00/2.01).
+ * active-loop 0.2.10 — Active Loop Picker for EP147 (XDJ-AZ 2.00/2.01).
  *
+ * 0.2.10 (AZ-EMU al029a round: the firmware ignored a same-extent store and DELETES the old flagged loop on a new flag):
+ *        The mod now NEVER deletes a memory loop it did not store itself in this session and confirm in the ANLZ read-back.
+ *        There is no set-flag-in-place path in the firmware (CacheableCueInfo::doRegisterCue 0x1890808 ignores a store whose
+ *        kind and in/out, in whole ms, equal an existing memory cue; storing a FLAGGED memory loop deregisters every other
+ *        flagged one). So SHIFT+pad saves only when it can do so without losing anything:
+ *          - an unflagged memory loop with the same in/out exists: armed only, "NOT saved: same loop already in memory";
+ *          - one is already flagged (rekordbox's): armed, "already saved", nothing stored;
+ *          - another flagged loop we do not own exists: armed only, "NOT saved: another loop is saved as Active" (the
+ *            firmware would delete it);
+ *          - otherwise a flagged memory copy is stored; ~5 s later the ANLZ read-back confirms it (one flagged loop there,
+ *            the loop count we expected) and only then it may be deleted again by this mod (second press, DELETE+pad).
+ *        Second press on a loop that is not ours-and-confirmed: Active Loop off, the saved flag STAYS and the toast says so.
+ *        If our copy cannot be removed now (no store pointer / queue busy) the loop stays armed (no flag left behind silently).
+ *        The memory limit counts memory points as well as loops (from the ANLZ). The store pointer is recognised by the real
+ *        CueStoreMaintainer vtable (0x2951330) / task queue (the 0.2.9 check looked for 0x86b410 in the vtable: wrong), and
+ *        also searched in the CueCallManager after any cue delete.
+ *        Everything below is 0.2.9 (red pad, persist jobs, read-back) except where it says "ours".
+ * 0.2.9: the Active Loop is KEPT, and its pad is RED.
+ *        SHIFT+loop pad, first press: arms the loop (as 0.2.8) and saves it: a memory-kind copy of the loop with the rekordbox
+ *          Active Loop flag (CueProperty+0xe1 = 1) is stored through the firmware's own store (0x86b410), so the firmware's cue
+ *          write-back (database / ANLZ) persists it. Nothing is written by the mod itself.
+ *        SHIFT+the red pad, second press: Active Loop off (cleared); the normal hot cue loop stays.
+ *        DELETE+pad: as before it deletes the hot cue; OUR flagged memory copy is deleted with it.
+ *        Red pad: on_frame edits the pad's LED cell (the pad of the armed loop, else of the flagged loop of the track) to FF0000
+ *          at the cell's own brightness, only while HOT CUE is the lit pad mode. Stock rewrites the frame every cycle, so
+ *          stopping the edit restores the pad's own colour. A track loaded with a flagged loop that equals a hot cue loop shows
+ *          that pad red at once. The jog display tile is not recoloured.
+ *        Persist jobs (store / delete) run in the tick, one per ~130 ms, in order.
+ *        ~5 s after the last job the track's ANLZ is re-read (READ-ONLY) and logged as "persist check ... OK / MISMATCH".
+ *        SHIFT+MEMORY, SHIFT+DELETE, SHIFT+point cue, DELETE+MEMORY and the rest of 0.2.8 are unchanged.
+ *
+ * 0.2.8 — SHIFT+pad / DELETE+pad (below).
+ *
+ * 0.2.8: SHIFT+pad arms a loop pad (as 0.2.7), DELETE+pad deletes a hot cue. Stock's SHIFT+pad
+ *        delete cannot be swallowed: CueCallManager::deleteCue (0x861218) only queues the
+ *        database/ANLZ write; the live hot cue is cleared earlier by CueLoopSetFacade::clearCue
+ *        (0x1431720), so a deleteCue swallow armed the loop AND still deleted the cue (AZ-EMU).
+ *          - SHIFT+pad on a hot cue loop: the filter eats the pad, the loop becomes the Active
+ *            Loop. SHIFT+pad on a point cue: replayed to stock (40 ms), so it is deleted as
+ *            before. SHIFT+pad on an empty pad: swallowed (stock would store a cue).
+ *          - DELETE held (no SHIFT): the DELETE bit is eaten; a pad pressed meanwhile is sent to
+ *            stock as SHIFT+pad, which deletes that hot cue (a loop pad too). DELETE released with
+ *            no pad: replayed as a 40 ms tap, so plain DELETE (memory cue) still works.
+ *        deleteCue (0x861218) is now an observer only (never changes behaviour; row off = pure
+ *        pass-through, no event): it drops stale loops from the list and clears the Active Loop
+ *        when its loop (hot or memory) is deleted. Memory-loop deletes match the nearest in/out
+ *        within 0.5 s (the ANLZ-built loop can be ~0.2 s off). The loop list is also checked
+ *        against the live hot-cue slots before it is used. The observer copies the cue and
+ *        nothing else; the ring is pre-touched at init (AZ-EMU saw a 2.8 ms first call).
+ *        0.2.8 (al028b round, AZ-EMU: the core switched the frame filter off in 3 of 3 sessions, own peak
+ *        1801.8 us after bursts of cue stores/deletes):
+ *          - The filter is O(1): bit ops and its own 64-byte state, no clock (one sample per 256 frames,
+ *            2 reads), no log, no call, no read of live cue memory (every slot read moved to the tick),
+ *            nothing allocated. Replay lengths are counted in FRAMES (8-bit frame counter), the tick
+ *            calibrates the frame rate. The own-time sample is 1/256 (it was 1/64).
+ *          - The strikes came from cold or evicted code (page faults / emulator translation) after the
+ *            DB/ANLZ write bursts, not from the work in the filter. The mod's own read-only segments are
+ *            mlock()ed at init (fallback: the tick touches them); every filter path is pre-run.
+ *          - The deleteCue observer reads two words of the cue and pushes to the ring: no firmware call,
+ *            no clock_gettime. Everything else (slot reads, matching, clearing) runs in the tick.
+ *          - Row off: hooks pass straight through, the tick returns early. No log, no toast, no
+ *            exit/auto-advance handling, no queue. One quiet clear when the row goes off.
+ *          - Deck: hot-cue deletes are attributed from the live LoopState slot of each deck; memory
+ *            deletes by the press / the one deck holding it; ambiguous = nothing changes.
+ *          - Active Loop is cleared only for the same kind/slot it was armed from (never by extent alone).
+ *          - A loop stored both as memory and as hot cue (same extent) counts once.
+ *        0.2.8 (al028c round, AZ-EMU on the emulator; 0.2.8 was rebuilt, the version stays):
+ *          - Filter: still no lock / log / allocation / syscall / call; its three 64-byte lines (state, diagnostics,
+ *            tick-owned) are written once at init and mlock()ed with the code. EVERY call is timed (two cntvct
+ *            reads): calls over 100 / 200 us and the gap between calls are reported in the 30 s timing line, so a
+ *            strike can be told from a stall of the bus thread (the 1/256 sample could not see most strikes).
+ *          - DELETE tap: a hold is "not a tap" once a pad or SHIFT has joined it (SHIFT leaving first used to
+ *            make a tap = a stray memory-cue delete); a new DELETE press ends an older tap replay (its DELETE bit
+ *            used to be added back onto the new DELETE+pad frames = stock deleted the load/called memory cue as
+ *            well); a hold with a gap in the frames (the thread was stalled, a pad may have come and gone unseen)
+ *            is NOT replayed. SHIFT leads a pad the filter itself raises (DELETE+pad, replay) by one frame.
+ *          - Row: one line per switch (ON / OFF); hooks note the facades while off, so the decks bind the moment the
+ *            row goes on; a deck load is logged again; the ERP frame rate comes from the filter's own stamps;
+ *            routine chatter (toasts, store/delete observer lines) is capped at 40 lines per 10 s, so a stress run
+ *            stays under the core's 128 KB rotation.
+ *        0.2.8 (al028d round, AZ-EMU emulator, rebuilt again; the version stays):
+ *          - SHIFT+pad on an EMPTY pad stores nothing (it used to be replayed to stock, which STORES a cue there); DELETE+pad
+ *            on an empty pad likewise; a pad that went down under SHIFT stays eaten until it is released.
+ *          - The stall test is relative to the measured frame interval (3x the typical interval, min 5 ms), so a plain
+ *            DELETE tap is replayed at the emulator's 17 frames/s too; the replay length is known after ~1 s.
+ *          - "track loaded" is logged by every path that sees a load; the core's deck event does not fire for a deck's first
+ *            load or for the same track again.
+ *        0.2.8 (al028g round, log-only fixes; the filter is untouched): the load cues run before the deck reports the new
+ *          track, so "track loaded" printed the PREVIOUS track's content id and the stale id could start a second load
+ *          (a second "reading stored loops"). The id of a load now comes from load_id(): 0 (not known yet) for the first
+ *          second after the last load cue, then the deck's id, as try_restore and anlz_service use it.
  * 0.2.7: frame filter switched off by the core: say what is really lost (only the SHIFT
  *        combos; auto-arm, engage and Auto-advance run on hooks and keep working), show it
  *        on the page; one-shot playhead diagnostics per armed loop (approaching / not moving).
@@ -53,7 +144,7 @@
  *
  * 0.2.0 (redesign):
  *  - Any stored loop can be the Active auto loop without moving the playhead:
- *    SHIFT+pad = that hot cue loop; SHIFT+MEMORY = next stored loop ahead (repeat cycles).
+ *    SHIFT+pad = that hot cue loop (0.2.8: DELETE+pad deletes a hot cue); SHIFT+MEMORY = next stored loop ahead (repeat cycles).
  *  - Set/clear queued and applied by a hook on 0x14b37a0 (engage check, playhead thread).
  *  - Re-arm: if LoopState still holds an older, non-looping loop, the firmware's own engage
  *    0x14b31f0 runs at the in point (replaces LoopState's loop, starts it).
@@ -126,8 +217,15 @@
  *    in tick().
  *  - Still no MoveChecking 0x155f500.
  */
+#ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
+#endif
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE   /* dl_iterate_phdr */
+#endif
 #include <stdint.h>
+#include <link.h>
+#include <sys/mman.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
@@ -163,6 +261,10 @@
 #define VA_LS_HAS_LOOP ((uintptr_t)0x149f090u)
 #define VA_LS_LOOPING  ((uintptr_t)0x149eee8u)
 #define VA_SETOUT    ((uintptr_t)0x1437c20u)   /* CueLoopSetFacade::setLoopOutPoint */
+#define VA_DELETE    ((uintptr_t)0x861218u)    /* CueCallManager::deleteCue(this, CueKind, const CueProperty&) */
+/* first two instructions of 0x861218 on 2.00/2.01: sub sp,sp,#0x310 ; mov w3,w1 */
+#define DELETE_INS0  0xd10c43ffu
+#define DELETE_INS1  0x2a0103e3u
 
 #define CUE_SIZE     256
 #define NDECK        4
@@ -170,6 +272,7 @@
 #define NMEM         32
 #define MEM_SOFT_CAP 10
 #define KIND_MEM     0
+#define CP_FLAG      0xe1   /* CueProperty: the rekordbox Active Loop flag byte (memory cues only) */
 
 /* Facade layout (CueLoadFacade and CueLoopSetFacade share the base at +8). */
 #define OFF_LOOP_ST  0x60   /* Y[0xf]  */
@@ -238,6 +341,7 @@ static void *ls_of[NDECK];
 static uint32_t bind_logged;
 static uint32_t engine_mismatch[NDECK];
 static void *store_any;                 /* atomic (hook writes one aligned pointer) */
+static void *mgr_any;                   /* atomic: the CueCallManager deleteCue ran on (0.2.9: its +0x140 is the store) */
 
 #define NFAC 16
 typedef struct {
@@ -259,15 +363,16 @@ static int     mem_n[NDECK];
 static uint8_t mem_ok[NDECK][NMEM];
 static uint8_t mem_live[NDECK][NMEM];   /* 1 = seen live from the firmware, dup-able */
 static int64_t last_call_in[NDECK], last_call_out[NDECK];
-static int64_t del_pend_in[NDECK], del_pend_out[NDECK];
-static int     del_pend_ok[NDECK];
 static void set_active_mem(int d, int i, const char *why);
 static int     last_call_ok[NDECK];
 static long     last_load_tick[NDECK];
 static uint8_t  act_buf[NDECK][CUE_SIZE] __attribute__((aligned(64)));
 static uint8_t  act_ok[NDECK];
 static int autoarm_done[NDECK];
+static void log_load(int d, const char *via);
+static void load_cue_seen(int d);        /* 0.2.8 al028g: a load cue of deck d (handle_ev) */
 static void track_changed(int d, const char *why);   /* 1 = mem_buf slot holds a constructed CueProperty */
+static int  load_changed(int d, const char *why);    /* 0.2.8 al028f: track_changed once per load, whichever path saw it first */
 static int     last_mem[NDECK] = { -1, -1, -1, -1 };
 static uint8_t hot_buf[NDECK][NHOT][CUE_SIZE] __attribute__((aligned(64)));
 static int     hot_ok[NDECK][NHOT];
@@ -279,12 +384,14 @@ static int side_deck[2] = { 0, 1 };
  * cue copy (0x8504a8) does 8/16-byte accesses -> alignment fault in our .bss.
  * Now: slot 64-aligned, cue first at +0 (16-aligned), metadata naturally aligned,
  * atomics only on aligned u32. */
-enum { SRC_CALL = 1, SRC_LOAD, SRC_STORE, SRC_SETOUT };
+enum { SRC_CALL = 1, SRC_LOAD, SRC_STORE, SRC_SETOUT, SRC_DELETE };
 #define RING 64
 typedef struct __attribute__((aligned(64))) {
     uint8_t   cue[CUE_SIZE] __attribute__((aligned(16)));
     void     *facade;       /* raw arg, decoded in tick */
-    uint64_t  t_ns;         /* CLOCK_MONOTONIC at the hook */
+    uint64_t  t_ns;         /* the hook's cntvct read (counter ticks); the tick converts it to ns */
+    int64_t   din, dout;    /* SRC_DELETE: the cue's in/out as read in the hook (no firmware call) */
+    int32_t   draw;         /* SRC_DELETE: din/dout are valid */
     uint32_t  seq;          /* index+1 when ready, 0 = free (atomic) */
     int32_t   kind;
     int32_t   src;
@@ -303,20 +410,57 @@ static int      ring_stall;
 /* ---- filter -> tick (0.1.7) ----
  * The filter keeps everything in one 64-byte line and publishes one u64 per frame with a
  * single relaxed store. Layout of snap (per side s, base = 28*s):
- *   nibble counters (wrap at 16) at base+0 SET, +4 CLR, +8 PAD, +12 PRESS, +16 SEC, +20 PRI;
- *   pad kind (1..8) at base+24; heartbeat frame counter at bits 56..63.
+ *   nibble counters (wrap at 16) at base+0 SET, +4 CLR, +8 PAD (SHIFT+pad), +12 PRESS,
+ *   +16 SEC, +20 PRI; pad kind (1..8) at base+24; heartbeat frame counter at bits 56..63.
  * The tick diffs counters against its last copy, so no press is lost between ticks. */
 enum { SG_SET = 0, SG_CLR, SG_PAD, SG_PRESS, SG_SEC, SG_PRI, NSIG };
+/* 0.2.8 (al028c): three cache lines, each with ONE writer. Lines 0 and 1 are written only by the filter
+ * (the tick reads them, and clears the diagnostic maxima with a plain load + store); line 2 is written
+ * only by the tick / UI thread (the filter reads it; it clears `req` once). The old single line was
+ * ping-ponged between cores by every tick write. */
+#define STAMP_MASK 0xffffffffffull          /* stamp: wraps << 40 | counter & STAMP_MASK */
 static struct __attribute__((aligned(64))) {
-    uint64_t snap;      /* filter writes (relaxed store), tick reads (relaxed load) */
-    uint32_t prev;      /* filter-only: last level bits, 14 per side, bit 31 = seen */
-    uint32_t cfg;       /* tick writes (relaxed), filter reads: CFG_* | combo */
-    uint32_t del;       /* filter: stock DELETE (no SHIFT) edge counter per side (byte s) */
-    uint32_t fmax;      /* 0.2.1: filter's own max duration, cntvct ticks (tick swaps to 0) */
-    uint32_t fover;     /* 0.2.1: calls over thr */
-    uint32_t thr;       /* tick writes: 100 us in cntvct ticks */
+    struct __attribute__((aligned(64))) {       /* line 0: filter state, filter-owned */
+        uint64_t snap;      /* filter writes (relaxed store), tick reads (relaxed load) */
+        uint64_t stamp;     /* filter, once per 256 frames: (256-frame wraps << 40) | counter, for the frame rate */
+        uint64_t last_t;    /* filter-only: counter at the previous call's entry */
+        uint32_t prev;      /* filter-only: last level bits, 14 per side, bit 31 = seen */
+        uint8_t  rp_t0[2];  /* filter-only: SHIFT+pad replay start per side (heartbeat count, 8 bits) */
+        uint8_t  rp[4];     /* filter-only: [0..1] pad bits being replayed with SHIFT, [2..3] DELETE tap */
+        uint8_t  dh[2];     /* filter-only: DELETE held (not with SHIFT first) since this frame count started */
+        uint8_t  du[2];     /* filter-only: a pad or SHIFT joined that DELETE hold: it is not a tap */
+        uint8_t  dh_t0[2];  /* filter-only: heartbeat count at DELETE down; after the release: start of the tap replay */
+        uint8_t  sl[2];     /* filter-only: SHIFT was asserted by the filter on the previous frame (it leads the pad by 1 frame) */
+        uint32_t fi;        /* filter-only (tick reads): running estimate of the TYPICAL frame interval, cntvct ticks (0.2.8 al028d) */
+        uint8_t  fn;        /* filter-only (tick reads): intervals measured so far, saturates at 255 */
+        uint8_t  pe[2];     /* filter-only: pad bits that went down under SHIFT (or on an empty pad under DELETE): kept eaten until the pad is up */
+    };
+    struct __attribute__((aligned(64))) {       /* line 1: filter diagnostics, filter-owned; the tick reads them and clears the maxima */
+        uint32_t fmax;      /* longest call (entry to exit, wall clock), cntvct ticks (tick swaps to 0) */
+        uint32_t fover;     /* calls over thr (100 us) */
+        uint32_t fover2;    /* calls over thr2 (200 us = the core's budget) */
+        uint32_t gmax;      /* longest gap between two calls (frame period incl. any stall), ticks */
+        uint32_t gover;     /* gaps over the stall threshold (3x the typical frame interval, min 5 ms): the bus thread did not run */
+        uint32_t tap;       /* DELETE-only tap replayed: seq << 16 | side << 8 | frames held */
+        uint32_t tapx;      /* DELETE-only taps NOT replayed because the frames had a gap (stall) during the hold: a seq counter */
+        uint32_t dlp;       /* DELETE+pad rewritten as SHIFT+pad: seq << 16 | side << 8 | pad kind (1..8) */
+        uint32_t dle;       /* DELETE+pad on an EMPTY pad, swallowed: seq << 16 | side << 8 | pad kind (1..8) */
+        uint32_t nedge;     /* frames that took the full path (an edge, a held SHIFT/DELETE or a pending replay) */
+    };
+    struct __attribute__((aligned(64))) {       /* line 2: tick-owned */
+        uint32_t cfg;       /* tick writes (relaxed), filter reads: CFG_* | combo */
+        uint32_t thr;       /* 100 us in cntvct ticks */
+        uint32_t thr2;      /* 200 us */
+        uint32_t gthr;      /* floor of the stall threshold, cntvct ticks (5 ms); the threshold is 3x the typical frame interval (fi), never below this */
+        uint32_t req;       /* tick -> filter: replay SHIFT+pad: RQ_VALID | side << 9 | pad bits (0 = none) */
+        uint32_t rp_frames; /* tick writes: replay length in FRAMES (40 ms at the measured frame rate) */
+        uint32_t emp;       /* tick writes while DELETE is held on a side: pad bits known EMPTY (side A bits 0..7, side B 8..15), else 0 */
+    };
 } FS;
-_Static_assert(sizeof FS == 64, "FS one line");
+#define RQ_VALID 0x100u
+#define FI_MIN 16u                  /* intervals needed before the stall test and the replay length are trusted */
+#define FI_CAP 0x40000000ull        /* one interval sample, cntvct ticks (caps a stall that opens the measurement) */
+_Static_assert(sizeof FS == 192 && __builtin_offsetof(typeof(FS), fmax) == 64 && __builtin_offsetof(typeof(FS), cfg) == 128, "FS: three lines, one writer each");
 static uint64_t tk_snap;               /* tick-only: last snapshot processed */
 static int      tk_hb_same, filter_dead, tk_hb_seen;
 static uint64_t press_obs_ns[2];       /* tick-only: when the tick saw a PRESS per side */
@@ -328,6 +472,10 @@ static inline uint64_t cnt_frq(void) { uint64_t v; __asm__ volatile("mrs %0, cnt
 static inline uint64_t cnt_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
 static inline uint64_t cnt_frq(void) { return 1000000000ull; }
 #endif
+/* 0.2.8: hooks stamp events with the counter (no clock_gettime in a hook); the tick converts. */
+static uint64_t cnt_hz = 1000000000ull;           /* set in init() from cntfrq_el0 */
+static uint64_t cnt_to_ns(uint64_t v) { return (uint64_t)((unsigned __int128)v * 1000000000ull / cnt_hz); }
+static int64_t  ring_off;                         /* tick: now_ns() - cnt_to_ns(cnt_now()), per drain */
 static uint32_t hmax_ec_own, hmax_ec_all, hmax_cue;   /* atomic, cntvct ticks, tick swaps */
 /* 0.2.3: tick reads then clears a diagnostic max with plain load + store (no RMW on a line the
  * filter or hook writes; a lost update only loses one sample) */
@@ -366,6 +514,23 @@ static int plausible(uintptr_t p)
 /* Fault-free read: process_vm_readv on ourselves returns EFAULT instead of SIGSEGV.
  * Tick-only (a syscall). */
 #define LOG(...) do { if (C && AZ_HAS(C, log)) C->log(MOD_ID, __VA_ARGS__); } while (0)
+/* 0.2.8 (al028c): the core keeps one log file of at most 256 KB per start, drops lines past that, and moves a file
+ * over 128 KB to .log.1 at the next start (so a stress run "rotates at load": the run is in .log.1). The per-event
+ * chatter (toasts, store/delete observer lines, set checks) is the bulk of it, so those lines go through LOGC: at
+ * most 40 per 10 s (tick thread only); a summary line says how many were left out. Results (Active Loop <-,
+ * armed loop deleted, pad:, timing, errors) are never throttled. */
+static unsigned logc_n, logc_drop; static uint64_t logc_t0;
+static int logc_ok(void)
+{
+    uint64_t now = now_ns();
+    if (!logc_t0 || now - logc_t0 >= 10000000000ull) {
+        if (logc_drop) { LOG("(%u routine log lines left out in the last 10 s: toasts, store/delete observer, set checks)", logc_drop); }
+        logc_t0 = now; logc_n = 0; logc_drop = 0;
+    }
+    if (logc_n < 40) { logc_n++; return 1; }
+    logc_drop++; return 0;
+}
+#define LOGC(...) do { if (logc_ok()) LOG(__VA_ARGS__); } while (0)
 
 /* Fallback when the kernel lacks process_vm_readv (ENOSYS / no CROSS_MEMORY_ATTACH):
  * check the range against readable mappings from /proc/self/maps (tick only). */
@@ -472,25 +637,25 @@ static void ts_hide(const char *why)
 {
     if (!tsurf || !ts_shown) return;
     C->surface_show(tsurf, 0); ts_shown = 0; ts_ready_deck = -1;
-    LOG("toast hidden (%s)", why);
+    LOGC("toast hidden (%s)", why);
 }
 static void do_toast_ms(const char *text, int ms, int ready_deck)  /* text: copied */
 {
     if (!text) return;
     if (!(__atomic_load_n(&cfg_bits, __ATOMIC_RELAXED) & CFG_TOAST)) {
-        LOG("toast off: %s", text);
+        LOGC("toast off: %s", text);
         return;
     }
     if (tsurf) {                                   /* updatable: replace in place, now */
-        if (ts_shown) LOG("toast superseded: '%s' -> '%s'", ts_text, text);
+        if (ts_shown) LOGC("toast superseded: '%s' -> '%s'", ts_text, text);
         snprintf(ts_text, sizeof ts_text, "%s", text);
         ts_ready_deck = ready_deck;
         ts_hide_ns = now_ns() + (uint64_t)ms * 1000000ull;
         C->surface_show(tsurf, 1); C->surface_redraw(tsurf); ts_shown = 1;
-        LOG("toast shown (%d ms): %s", ms, ts_text);
+        LOGC("toast shown (%d ms): %s", ms, ts_text);
         return;
     }
-    if (toast_pending) LOG("toast replaced before showing: %s", toast_text);
+    if (toast_pending) LOGC("toast replaced before showing: %s", toast_text);
     toast_text = text; toast_ms = ms; toast_ready_deck = ready_deck;
     toast_pending = 1;
     toast_due = tick_no + TOAST_COALESCE_TICKS;
@@ -503,7 +668,7 @@ static __attribute__((noinline)) void flush_toast(void)
     toast_pending = 0;
     if (!AZ_HAS(C, banner)) { LOG("toast: core has no banner"); return; }
     C->banner(MOD_ID, toast_text, toast_ms);
-    LOG("toast queued (%d ms): %s", toast_ms, toast_text);
+    LOGC("toast queued (%d ms): %s", toast_ms, toast_text);
 }
 
 /* 0.2.6: set only when init() completed; until then (or after a failed init) every hook is a
@@ -511,9 +676,9 @@ static __attribute__((noinline)) void flush_toast(void)
 static int al_live;
 
 /* ---- hook side: copy raw args only. No facade deref, no core call, no log. ---- */
-static void push_ev(void *facade, int kind, int src, const void *cue)
+static int push_ev(void *facade, int kind, int src, const void *cue)
 {
-    if (!__atomic_load_n(&al_live, __ATOMIC_ACQUIRE)) return;
+    if (!__atomic_load_n(&al_live, __ATOMIC_ACQUIRE)) return 0;
     uint64_t t0 = cnt_now();
     uint32_t i = __atomic_fetch_add(&ring_w, 1, __ATOMIC_ACQ_REL);
     ev_t *e = &ring[i % RING];
@@ -522,43 +687,70 @@ static void push_ev(void *facade, int kind, int src, const void *cue)
     if (!__atomic_compare_exchange_n(&e->seq, &free_seq, SEQ_BUSY, 0,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         __atomic_add_fetch(&ring_drop, 1, __ATOMIC_RELAXED);
-        return;
+        return 0;
     }
     e->facade = facade;
-    e->t_ns = now_ns();
+    e->t_ns = t0;                           /* one counter read serves the stamp and the self-timing */
+    e->draw = 0;
     e->kind = kind;
     e->src = src;
     e->has_cue = 0;
     /* The cue is a caller temporary, so it must be copied now; a raw byte copy would
      * keep dangling pointers of its owned members, so use the firmware copy-ctor
      * into the 16-aligned slot. Only for real cue kinds and a sane pointer. */
-    if (cue && plausible((uintptr_t)cue) && kind >= 0 && kind <= 8) {
+    if (src == SRC_DELETE) {
+        /* 0.2.8: the delete observer reads two words of the caller's own cue, and calls nothing */
+        if (cue && plausible((uintptr_t)cue)) {
+            e->din = *(const int64_t *)((const uint8_t *)cue + CUE_IN_TIME);
+            e->dout = *(const int64_t *)((const uint8_t *)cue + CUE_OUT_TIME);
+            e->draw = 1;
+        }
+    } else if (cue && plausible((uintptr_t)cue) && kind >= 0 && kind <= 8) {
         fw_cue_copy(e->cue, cue);
         e->has_cue = 1;
     }
     __atomic_store_n(&e->seq, i + 1, __ATOMIC_RELEASE);
     max_upd(&hmax_cue, cnt_now() - t0);
+    return 1;
 }
 
+
+/* Mod row off: every hook is a bare pass-through (no copy, no event, nothing for the tick). */
+static inline int row_on(void) { return (__atomic_load_n(&cfg_bits, __ATOMIC_RELAXED) & CFG_ENABLE) != 0; }
+/* 0.2.8 (al028c): with the row off the hooks still remember which facade objects they see (a pointer
+ * store into 8 slots, nothing else, nothing logged) so the decks can be bound the moment the row goes
+ * on again, without a track reload. The tick resolves them (player id), the hook never dereferences. */
+#define NNF 8
+static void *nf_tab[NNF];
+static uint32_t nf_w;
+static inline void note_facade(void *f)
+{
+    if (!f) return;
+    for (int i = 0; i < NNF; i++) if (__atomic_load_n(&nf_tab[i], __ATOMIC_RELAXED) == f) return;
+    uint32_t w = __atomic_load_n(&nf_w, __ATOMIC_RELAXED);
+    __atomic_store_n(&nf_w, w + 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&nf_tab[w % NNF], f, __ATOMIC_RELAXED);
+}
 static void my_call(void *facade, uint32_t kind, void *cue)
 {
-    push_ev(facade, (int)kind, SRC_CALL, cue);
+    if (row_on()) push_ev(facade, (int)kind, SRC_CALL, cue); else note_facade(facade);
     orig_call(facade, kind, cue);
 }
 static void my_load(void *facade, uint32_t kind, void *cue)
 {
-    push_ev(facade, (int)kind, SRC_LOAD, cue);
+    if (row_on()) push_ev(facade, (int)kind, SRC_LOAD, cue); else note_facade(facade);
     orig_load(facade, kind, cue);
 }
 static void my_store(void *store, int kind, void *cue)
 {
     if (plausible((uintptr_t)store) && __atomic_load_n(&al_live, __ATOMIC_ACQUIRE)) __atomic_store_n(&store_any, store, __ATOMIC_RELEASE);
-    push_ev(NULL, kind, SRC_STORE, cue);
+    if (row_on()) push_ev(NULL, kind, SRC_STORE, cue);
     orig_store(store, kind, cue);
 }
 static void my_setout(void *facade, int kind, int slip)
 {
     orig_setout(facade, kind, slip);
+    if (!row_on()) { note_facade(facade); return; }
     if (kind >= 1 && kind <= 8) push_ev(facade, kind, SRC_SETOUT, NULL);  /* slot read in tick */
 }
 
@@ -670,6 +862,28 @@ static void bind_once(int d, void *facade)
     }
 }
 
+/* 0.2.8: bind the decks whose facades the hooks saw while the row was off (tick only). Returns a
+ * bit set of the decks bound now. Same player-id rule as deck_of_facade; a clash binds nothing. */
+static unsigned bind_noted(void)
+{
+    unsigned got = 0;
+    for (int i = 0; i < NNF; i++) {
+        void *f = __atomic_load_n(&nf_tab[i], __ATOMIC_RELAXED);
+        if (!f || !plausible((uintptr_t)f)) continue;
+        int p = pid_of_facade((uintptr_t)f);
+        if (p < 0 || engine_of[p]) continue;
+        int clash = 0;
+        for (int k = 0; k < fac_n; k++) if (fac_map[k].facade != f && fac_map[k].deck == p) clash = 1;
+        if (clash) continue;
+        fac_t *e = fac_get(f);
+        if (!e) continue;
+        e->pid = p; e->deck = p;
+        bind_once(p, f);
+        if (engine_of[p]) { got |= 1u << p; ready_sched(p); }
+    }
+    return got;
+}
+
 /* ---- ERP filter: bit tests only. No bind, resolve, log, row_value, or shared locks. ---- */
 #define NIB_INC(sn, pos) ((sn) = ((sn) & ~(0xfull << (pos))) | \
                          ((((((sn) >> (pos)) & 0xfull) + 1u) & 0xfull) << (pos)))
@@ -682,82 +896,216 @@ static void bind_once(int d, void *facade)
       ((((unsigned)(f)[P##_PRI_O] >> P##_PRI_B) & 1u) << 5) | \
       ((unsigned)(f)[P##_PAD_O] << 6) )
 
-/* Filter: level bits, eat, count edges, one relaxed store. No clock, no RMW atomics,
- * no deck logic, no calls. */
+/* Per-side frame offsets (A = left, B = right), for the code that is not duplicated per side. */
+static const struct { uint8_t sh_o, sh_b, mem_o, mem_b, del_o, del_b, pad_o; } SO[2] = {
+    { A_SH_O, A_SH_B, A_MEM_O, A_MEM_B, A_DEL_O, A_DEL_B, A_PAD_O },
+    { B_SH_O, B_SH_B, B_MEM_O, B_MEM_B, B_DEL_O, B_DEL_B, B_PAD_O },
+};
+
+/* 0.2.8 filter (fallback design; stock SHIFT+pad is a hot cue DELETE and cannot be swallowed):
+ *   SHIFT+pad          pad eaten (no stock delete); the tick arms a loop pad, or asks for a replay
+ *                      of the SHIFT+pad (FS.req) when the pad is a point cue, so stock deletes it.
+ *   DELETE (alone)     the DELETE bit is eaten while held. A pad pressed meanwhile is rewritten to
+ *                      SHIFT+pad (SHIFT bit set), so stock deletes that hot cue. Released with no
+ *                      pad: DELETE is replayed for rp_frames frames (a tap), so plain DELETE works.
+ *   SHIFT+MEMORY/DELETE  as 0.2.x (cycle / clear), bits eaten.
+ * O(1) and wait-free: bit tests on the frame, edge counts into one u64 (one relaxed store), replay
+ * timing by FRAME COUNT (the heartbeat). No lock, no allocation, no libc call, no read of cue or
+ * LoopState memory (all of that is in the tick), and no clock read except 1 frame in 256 for the
+ * self-measurement. The core's budget is 200 us per call, 8 strikes per session: what costs a call
+ * 200 us under qemu is a cold code page or a translation-cache flush, not the work. */
+/* The filter proper: no lock, no allocation, no libc call, no syscall, no log, no read of cue or
+ * LoopState memory. It touches the frame (the core's buffer) and the three FS lines only; those
+ * lines and this code are pre-run and mlock()ed at init. `t0` is the entry counter. */
+static inline __attribute__((always_inline)) void erp_work(unsigned char *frame, uint64_t t0, int stall)
+{
+    uint32_t cfg = __atomic_load_n(&FS.cfg, __ATOMIC_RELAXED);
+    uint64_t sn = FS.snap + (1ull << 56);                /* heartbeat = frame counter, 8 bits */
+    unsigned hb = (unsigned)(sn >> 56);
+    if (__builtin_expect(hb == 0, 0))                    /* once per 256 frames: the tick derives the frame rate */
+        __atomic_store_n(&FS.stamp, (((FS.stamp >> 40) + 1) << 40) | (t0 & STAMP_MASK), __ATOMIC_RELAXED);
+    if (!(cfg & CFG_ENABLE)) { __atomic_store_n(&FS.snap, sn, __ATOMIC_RELAXED); return; }
+    uint32_t cur = SIDE_BITS(frame, A) | (SIDE_BITS(frame, B) << 14);
+    uint32_t prev = FS.prev;
+    uint32_t rpw; memcpy(&rpw, FS.rp, sizeof rpw);
+    uint16_t pew; memcpy(&pew, FS.pe, sizeof pew);
+    /* fast path: nothing relevant changed, SHIFT and DELETE up on both sides, nothing pending */
+    if (__builtin_expect(((cur ^ prev) & 0x0fffffffu) == 0 && (prev >> 31) &&
+                         !(cur & (5u | (5u << 14))) && !rpw && !pew &&
+                         !__atomic_load_n(&FS.req, __ATOMIC_RELAXED), 1)) {
+        __atomic_store_n(&FS.snap, sn, __ATOMIC_RELAXED);
+        return;
+    }
+    uint32_t rise = (prev >> 31) ? (cur & ~prev) : 0u;
+    uint32_t fall = (prev >> 31) ? (prev & ~cur & 0x0fffffffu) : 0u;
+    FS.prev = cur | 0x80000000u;
+    __atomic_store_n(&FS.nedge, FS.nedge + 1, __ATOMIC_RELAXED);
+    int do_mem = cfg_combo_val(cfg) == COMBO_SHIFT_MEMORY;
+    int do_clr = (cfg & CFG_CLEAR) != 0;
+    int do_pad = (cfg & CFG_HOTCUE) != 0;
+    uint32_t rq = __atomic_load_n(&FS.req, __ATOMIC_RELAXED);
+    if (rq) {                                        /* the tick asks: replay SHIFT+pad once */
+        unsigned rs = (rq >> 9) & 1u;
+        __atomic_store_n(&FS.req, 0, __ATOMIC_RELAXED);
+        FS.rp[rs] = (uint8_t)(rq & 0xffu); FS.rp_t0[rs] = (uint8_t)hb;
+    }
+    const uint32_t rpf = FS.rp_frames;
+    const uint32_t emp = __atomic_load_n(&FS.emp, __ATOMIC_RELAXED);
+    for (int s = 0; s < 2; s++) {
+        unsigned c = (cur >> (14 * s)) & 0x3fffu, r = (rise >> (14 * s)) & 0x3fffu;
+        unsigned f = (fall >> (14 * s)) & 0x3fffu;
+        unsigned base = 28u * (unsigned)s, padnew = r >> 6;
+        if (r) {
+            if ((c & 1u) && (r & 2u) && do_mem) NIB_INC(sn, base + 0);
+            if ((c & 1u) && (r & 4u) && do_clr) NIB_INC(sn, base + 4);
+            if ((c & 1u) && padnew && do_pad) {
+                NIB_INC(sn, base + 8);
+                sn = (sn & ~(0xfull << (base + 24))) |
+                     ((uint64_t)(__builtin_ctz(padnew) + 1) << (base + 24));
+            }
+            /* PRESS: MEMORY, CALL or a pad went down on this side. The tick uses it to
+             * attribute the deleteCue / store hook events to a deck. */
+            if ((r & (2u | 8u)) || padnew) NIB_INC(sn, base + 12);
+            if (r & 16u) NIB_INC(sn, base + 16);
+            if (r & 32u) NIB_INC(sn, base + 20);
+        }
+        const unsigned char shm = (unsigned char)(1u << SO[s].sh_b);
+        const int sh = (c & 1u) != 0, dl = (c & 4u) != 0;
+        if (do_pad) {
+            /* DELETE hold state, kept until DELETE itself is released (0.2.8 al028c: it used to be cleared when
+             * SHIFT joined, so SHIFT+DELETE, SHIFT up, DELETE up made a tap = a stray memory-cue delete).
+             * A pad or SHIFT during the hold makes it "not a tap". A tap is replayed only when DELETE alone
+             * was held and released. A new DELETE press ends an older tap replay at once (it used to add its
+             * DELETE bit back onto the new DELETE+pad frames: stock then also deleted the load/called memory cue). */
+            if (dl) {
+                if (!FS.dh[s]) { FS.dh[s] = 1; FS.du[s] = 0; FS.dh_t0[s] = (uint8_t)hb; FS.rp[2 + s] = 0; }
+                if (stall) FS.du[s] |= 2;                        /* frames were missing: a pad may have come and gone unseen */
+                if (sh || (c >> 6)) FS.du[s] |= 1;
+            } else {
+                if (stall && FS.dh[s]) FS.du[s] |= 2;
+                if ((f & 4u) && FS.dh[s] && FS.du[s] == 2 && !sh)    /* alone, but frames were missing: do NOT guess a tap */
+                    __atomic_store_n(&FS.tapx, FS.tapx + 1, __ATOMIC_RELAXED);
+                if ((f & 4u) && FS.dh[s] && !FS.du[s] && !sh) {      /* released, alone: replay a tap */
+                    FS.tap = ((FS.tap & 0xffff0000u) + 0x10000u) | ((uint32_t)s << 8) | (uint8_t)(hb - FS.dh_t0[s]);
+                    FS.rp[2 + s] = 1; FS.dh_t0[s] = (uint8_t)hb;
+                    NIB_INC(sn, base + 12);                            /* PRESS, for the deleteCue event */
+                }
+                FS.dh[s] = 0; FS.du[s] = 0;
+            }
+        }
+        /* eat / rewrite (level based).
+         * pe (0.2.8 al028d): a pad that went down while SHIFT was held is SHIFT+pad's, and stays eaten until the
+         * pad itself is up: if SHIFT came up first the pad level used to reach stock as a NEW plain press (on an
+         * empty pad: a stored hot cue; on a loop pad: the loop). The same for a pad pressed under DELETE on an
+         * EMPTY pad (emp, published by the tick while DELETE is held): swallowed, never sent as SHIFT+pad. */
+        int lead = 0;                                   /* the filter makes SHIFT up on this frame itself */
+        unsigned pe = FS.pe[s], padr = (r >> 6) & 0xffu;
+        if (do_pad && sh) pe |= padr;
+        if (sh) {
+            if (do_mem) frame[SO[s].mem_o] &= (unsigned char)~(1u << SO[s].mem_b);
+            if (do_clr) frame[SO[s].del_o] &= (unsigned char)~(1u << SO[s].del_b);
+            if (do_pad) frame[SO[s].pad_o] = 0;
+        } else if (do_pad && dl) {
+            frame[SO[s].del_o] &= (unsigned char)~(1u << SO[s].del_b);
+            const unsigned em = (emp >> (8 * s)) & 0xffu, sw = padr & em & ~pe;
+            if (sw) {                                    /* a pad pressed now is EMPTY: nothing to delete, nothing to store */
+                FS.dle = ((FS.dle & 0xffff0000u) + 0x10000u) | ((uint32_t)s << 8) | (uint32_t)(__builtin_ctz(sw) + 1);
+                pe |= sw;
+            }
+            frame[SO[s].pad_o] &= (unsigned char)~pe;
+            if (frame[SO[s].pad_o]) {                    /* DELETE+pad -> SHIFT+pad */
+                frame[SO[s].sh_o] |= shm; lead = 1;
+                if (padr & ~pe) {
+                    FS.dlp = ((FS.dlp & 0xffff0000u) + 0x10000u) | ((uint32_t)s << 8) | (uint32_t)(__builtin_ctz(padr & ~pe) + 1);
+                }
+            }
+        } else if (do_pad) frame[SO[s].pad_o] &= (unsigned char)~pe;
+        if (do_pad) { pe &= (c >> 6) & 0xffu; FS.pe[s] = (uint8_t)pe; }
+        if (FS.rp[s]) {
+            if ((unsigned)((uint8_t)(hb - FS.rp_t0[s])) < rpf) {
+                frame[SO[s].pad_o] |= FS.rp[s]; frame[SO[s].sh_o] |= shm; lead = lead | 2;
+            } else FS.rp[s] = 0;
+        }
+        if (FS.rp[2 + s]) {
+            if (!dl && (unsigned)((uint8_t)(hb - FS.dh_t0[s])) < rpf) frame[SO[s].del_o] |= (unsigned char)(1u << SO[s].del_b);
+            else FS.rp[2 + s] = 0;
+        }
+        /* SHIFT leads the pad by one frame whenever the filter (not the player's finger) raises SHIFT: a real
+         * SHIFT+pad always arrives SHIFT first, and stock may decode both bits of one frame in either order
+         * (0.2.8 al028c: the first DELETE+pad after a quiet period acted as a plain pad + DELETE). */
+        if (lead && !sh) {
+            if (!FS.sl[s]) {
+                FS.sl[s] = 1;
+                unsigned char m = 0;
+                if (lead & 1) m |= (unsigned char)(padr & ~pe);   /* pad bits that rose on this very frame */
+                if (lead & 2) m |= FS.rp[s];                    /* a replay that starts now */
+                frame[SO[s].pad_o] &= (unsigned char)~m;        /* this frame: SHIFT only; the pad follows on the next */
+            }
+        } else FS.sl[s] = 0;
+    }
+    __atomic_store_n(&FS.snap, sn, __ATOMIC_RELAXED);   /* the one published store */
+}
+
+/* 0.2.8 (al028c): every call is timed (two counter reads, no syscall), so a strike can be told
+ * from a stall. `fmax`/`fover`/`fover2` are the call's own wall time: preemption inside the call
+ * counts, which is what the core's timer counts too. `gmax`/`gover` are the gaps between two calls
+ * (the frame period): a gap of many ms with a short call is the guest not running this thread. */
 __attribute__((hot)) static int on_erp(int bus, unsigned char *frame, int len, void *user)
 {
     (void)bus; (void)user;
+    const uint64_t t0 = cnt_now();
     if (__builtin_expect(!frame || len < ERP_LEN, 0)) return AZ_FRAME_OK;
-    uint32_t cfg = __atomic_load_n(&FS.cfg, __ATOMIC_RELAXED);
-    uint64_t sn = FS.snap;
-    sn += 1ull << 56;                                    /* heartbeat */
-    /* 0.2.2: own timing only on 1 frame in 64 (heartbeat low bits) and on slow paths */
-    uint64_t t0 = ((sn >> 56) & 63u) == 0 ? cnt_now() : 0;
-    if (cfg & CFG_ENABLE) {
-        uint32_t cur = SIDE_BITS(frame, A) | (SIDE_BITS(frame, B) << 14);
-        uint32_t prev = FS.prev;
-        /* fast path: nothing relevant changed and SHIFT is up on both sides */
-        if (__builtin_expect(((cur ^ prev) & 0x0fffffffu) == 0 && (prev >> 31) &&
-                             !(cur & (1u | (1u << 14))), 1)) {
-            __atomic_store_n(&FS.snap, sn, __ATOMIC_RELAXED);
-            if (__builtin_expect(t0 == 0, 1)) return AZ_FRAME_OK;
-            goto timed;
-        }
-        if (!t0) t0 = cnt_now();
-        uint32_t rise = (prev >> 31) ? (cur & ~prev) : 0u;
-        FS.prev = cur | 0x80000000u;
-        int do_mem = cfg_combo_val(cfg) == COMBO_SHIFT_MEMORY;
-        int do_pad = (cfg & CFG_HOTCUE) || cfg_combo_val(cfg) == COMBO_PAD_ONLY;
-        int do_clr = (cfg & CFG_CLEAR) != 0;
-        if (__builtin_expect(rise != 0, 0)) {
-            for (int s = 0; s < 2; s++) {
-                unsigned c = (cur >> (14 * s)) & 0x3fffu, r = (rise >> (14 * s)) & 0x3fffu;
-                unsigned base = 28u * (unsigned)s, padnew = r >> 6;
-                if (!r) continue;
-                if ((c & 1u) && (r & 2u) && do_mem) NIB_INC(sn, base + 0);
-                if ((c & 1u) && (r & 4u) && do_clr) NIB_INC(sn, base + 4);
-                if ((c & 1u) && padnew && do_pad) {
-                    NIB_INC(sn, base + 8);
-                    sn = (sn & ~(0xfull << (base + 24))) |
-                         ((uint64_t)(__builtin_ctz(padnew) + 1) << (base + 24));
-                }
-                if ((r & (2u | 8u)) || padnew) NIB_INC(sn, base + 12);
-                if (r & 16u) NIB_INC(sn, base + 16);
-                if (r & 32u) NIB_INC(sn, base + 20);
-                if ((r & 4u) && !(c & 1u))          /* stock DELETE: rare, second store */
-                    __atomic_store_n(&FS.del, FS.del + (1u << (8 * s)), __ATOMIC_RELAXED);
-            }
-        }
-        /* eat (level based, stateless) */
-        if (cur & 1u) {
-            if (do_mem) frame[A_MEM_O] &= (unsigned char)~(1u << A_MEM_B);
-            if (do_clr) frame[A_DEL_O] &= (unsigned char)~(1u << A_DEL_B);
-            if (do_pad) frame[A_PAD_O] = 0;
-        }
-        if (cur & (1u << 14)) {
-            if (do_mem) frame[B_MEM_O] &= (unsigned char)~(1u << B_MEM_B);
-            if (do_clr) frame[B_DEL_O] &= (unsigned char)~(1u << B_DEL_B);
-            if (do_pad) frame[B_PAD_O] = 0;
-        }
+    const uint64_t last = FS.last_t, gap = t0 - last;
+    FS.last_t = t0;
+    int stall = 0;
+    if (last != 0) {
+        /* 0.2.8 al028d: the stall test is relative to the TYPICAL frame interval fi (the emulator serves ~17 frames/s, the
+         * deck ~1000/s; a fixed 40 ms made every emulator frame a "stall"). fi is a running estimate that follows the
+         * short intervals quickly (1/4 step) and the long ones slowly (1/16 step, each sample capped at 2*fi), i.e. it
+         * sits at the lower-middle of the intervals and a stall cannot drag it up. stall = gap > 3*fi, never below the
+         * floor (5 ms). Integer only, no call; judged only once FI_MIN intervals are known. */
+        const uint32_t fi = __atomic_load_n(&FS.fi, __ATOMIC_RELAXED), fn = FS.fn;
+        uint64_t lim = 3ull * fi, fl = __atomic_load_n(&FS.gthr, __ATOMIC_RELAXED);
+        if (lim < fl) lim = fl;
+        stall = fn >= FI_MIN && gap > lim;
+        uint64_t g = gap > FI_CAP ? FI_CAP : gap, nf;
+        if (!fi) nf = g ? g : 1;
+        else if (g < fi) nf = fi - ((fi - g) >> 2);
+        else { uint64_t cl = g > 2ull * fi ? 2ull * fi : g; nf = fi + ((cl - fi) >> 4); }
+        __atomic_store_n(&FS.fi, (uint32_t)nf, __ATOMIC_RELAXED);
+        if (fn < 255) FS.fn = (uint8_t)(fn + 1);
     }
-    FS.snap = sn;   /* own copy (filter-only reader) ... */
-    __atomic_store_n(&FS.snap, sn, __ATOMIC_RELAXED);   /* ...and the one published store */
-timed:;
-    if (!t0) return AZ_FRAME_OK;
-    uint64_t dt = cnt_now() - t0;                       /* 0.2.1: our own time, self-measured */
+    erp_work(frame, t0, stall);
+    const uint64_t t1 = cnt_now();
+    const uint64_t dt = t1 - t0;
     if (__builtin_expect(dt > FS.fmax, 0)) __atomic_store_n(&FS.fmax, (uint32_t)(dt > 0xffffffffu ? 0xffffffffu : dt), __ATOMIC_RELAXED);
-    if (__builtin_expect(dt > FS.thr, 0)) __atomic_store_n(&FS.fover, FS.fover + 1, __ATOMIC_RELAXED);
+    if (__builtin_expect(dt > __atomic_load_n(&FS.thr, __ATOMIC_RELAXED), 0)) {
+        __atomic_store_n(&FS.fover, FS.fover + 1, __ATOMIC_RELAXED);
+        if (dt > __atomic_load_n(&FS.thr2, __ATOMIC_RELAXED)) __atomic_store_n(&FS.fover2, FS.fover2 + 1, __ATOMIC_RELAXED);
+    }
+    if (__builtin_expect(last != 0 && gap > FS.gmax, 0)) __atomic_store_n(&FS.gmax, (uint32_t)(gap > 0xffffffffu ? 0xffffffffu : gap), __ATOMIC_RELAXED);
+    if (__builtin_expect(stall, 0)) __atomic_store_n(&FS.gover, FS.gover + 1, __ATOMIC_RELAXED);
     return AZ_FRAME_OK;
 }
 
 /* Run every filter path once at init (before registering): the first execution of a code
  * path is the slow one (page-in, i-cache; on the qemu emulator, JIT translation). */
+static void filter_thresholds(void)
+{
+    uint64_t fq = cnt_frq(); if (!fq) fq = 1000000000ull;
+    FS.thr = (uint32_t)(fq / 10000u);      /* 100 us */
+    FS.thr2 = (uint32_t)(fq / 5000u);      /* 200 us: the core's budget per call */
+    FS.gthr = (uint32_t)(fq / 200u);       /* 5 ms: the floor of the stall threshold (3x the typical frame interval, measured by the filter) */
+}
 static void prewarm_filter(void)
 {
-    static const uint8_t pads[] = { 1, 2, 4, 128 };
+    filter_thresholds();
+    static const uint8_t pads[] = { 1, 2, 4, 128 };   /* pads still go through the SIDE_BITS / PRESS path */
     unsigned char f[ERP_LEN];
     uint32_t keep = FS.cfg;
-    FS.cfg = CFG_ENABLE | CFG_HOTCUE | CFG_CLEAR;
+    FS.cfg = CFG_ENABLE | CFG_CLEAR | CFG_HOTCUE;
+    FS.rp_frames = 4;
+    FS.snap = 255ull << 56;                   /* the first call lands on heartbeat 0: the timed path runs too */
     for (int rep = 0; rep < 3; rep++)
         for (int step = 0; step < 16; step++) {
             memset(f, 0, sizeof f);
@@ -766,11 +1114,96 @@ static void prewarm_filter(void)
             if (step & 4) { f[A_DEL_O] |= 1u << A_DEL_B; f[B_DEL_O] |= 1u << B_DEL_B;
                             f[A_SEC_O] |= 1u << A_SEC_B; f[B_PRI_O] |= 1u << B_PRI_B; }
             if (step & 8) { f[A_PAD_O] = pads[rep]; f[B_PAD_O] = pads[rep + 1]; }
+            FS.emp = rep == 1 ? (uint32_t)pads[rep] | ((uint32_t)pads[rep + 1] << 8) : 0;   /* the empty-pad swallow path runs once */
             on_erp(AZ_BUS_ERP_IN, f, ERP_LEN, NULL);
             memset(f, 0, sizeof f);
             on_erp(AZ_BUS_ERP_IN, f, ERP_LEN, NULL);
         }
-    FS.snap = 0; FS.prev = 0; FS.del = 0; FS.fmax = 0; FS.fover = 0; FS.cfg = keep;   /* 0.1.10 forgot del -> spurious DELETE */
+    memset(f, 0, sizeof f);
+    FS.req = RQ_VALID | 0x01u; on_erp(AZ_BUS_ERP_IN, f, ERP_LEN, NULL);        /* replay path, side A */
+    FS.req = RQ_VALID | (1u << 9) | 0x80u; on_erp(AZ_BUS_ERP_IN, f, ERP_LEN, NULL);   /* side B */
+    on_erp(AZ_BUS_ERP_IN, f, ERP_LEN, NULL);
+    FS.snap = 0; FS.prev = 0; FS.cfg = keep;
+    FS.stamp = 0; FS.last_t = 0; FS.fmax = 0; FS.fover = 0; FS.fover2 = 0; FS.gmax = 0; FS.gover = 0; FS.tap = 0; FS.tapx = 0; FS.dlp = 0; FS.dle = 0; FS.nedge = 0;
+    FS.fi = 0; FS.fn = 0; FS.emp = 0; memset(FS.pe, 0, sizeof FS.pe);
+    FS.rp_frames = 12; memset(FS.rp, 0, sizeof FS.rp); memset(FS.rp_t0, 0, sizeof FS.rp_t0); memset(FS.dh, 0, sizeof FS.dh);
+    memset(FS.du, 0, sizeof FS.du); memset(FS.dh_t0, 0, sizeof FS.dh_t0);
+    FS.req = 0;
+}
+
+/* ---- 0.2.8: keep our own code resident ----
+ * The core gives the filter 200 us per call and 8 strikes per session. Under memory pressure (the
+ * firmware writing databases and analysis files in a burst of cue stores/deletes) the kernel can drop
+ * clean file-backed pages of this library; the next frame then takes a major page fault, which is
+ * milliseconds, not the ~100 ns the filter needs (al028b: first strike 1801.8 us, always after a burst).
+ * So at init the mod's own read-only mapped segments (code and rodata, about 80 KB) are mlock()ed. If that is refused (the
+ * memlock limit), the tick touches one byte per page of those segments a few times a second, which
+ * keeps them young in the page cache instead. No allocation, nothing on the filter path. */
+#define PIN_MAX 4
+static struct { uintptr_t lo, hi; } pin_seg[PIN_MAX];
+static int pin_n, pin_locked, pin_bytes, pin_dlocked;
+static uintptr_t pin_dlo, pin_dhi;
+static volatile uint8_t pin_sink;
+static int pin_cb(struct dl_phdr_info *info, size_t sz, void *arg)
+{
+    (void)sz; (void)arg;
+    uintptr_t me = (uintptr_t)&pin_cb;
+    int mine = 0;
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_LOAD) continue;
+        uintptr_t lo = info->dlpi_addr + ph->p_vaddr, hi = lo + ph->p_memsz;
+        if (me >= lo && me < hi) mine = 1;
+    }
+    if (!mine) return 0;
+    long pg = sysconf(_SC_PAGESIZE); if (pg <= 0) pg = 4096;
+    for (int i = 0; i < info->dlpi_phnum && pin_n < PIN_MAX; i++) {
+        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_LOAD || !(ph->p_flags & PF_R) || (ph->p_flags & PF_W)) continue;   /* code + rodata: clean, file-backed, evictable */
+        uintptr_t lo = (info->dlpi_addr + ph->p_vaddr) & ~(uintptr_t)(pg - 1);
+        uintptr_t hi = (info->dlpi_addr + ph->p_vaddr + ph->p_memsz + (uintptr_t)pg - 1) & ~(uintptr_t)(pg - 1);
+        pin_seg[pin_n].lo = lo; pin_seg[pin_n].hi = hi; pin_n++;
+    }
+    return 1;
+}
+static void pin_code(void)
+{
+    pin_n = pin_locked = pin_bytes = 0;
+    dl_iterate_phdr(pin_cb, NULL);
+    int ok = pin_n > 0;
+    for (int i = 0; i < pin_n; i++) {
+        pin_bytes += (int)(pin_seg[i].hi - pin_seg[i].lo);
+        if (mlock((const void *)pin_seg[i].lo, pin_seg[i].hi - pin_seg[i].lo) != 0) ok = 0;
+    }
+    pin_locked = ok;
+    /* the filter's own data (the three FS lines, 192 bytes, may straddle a page): written once now so
+     * the pages exist (no first-touch fault on the bus thread), then locked */
+    {
+        long pg = sysconf(_SC_PAGESIZE); if (pg <= 0) pg = 4096;
+        uintptr_t lo = (uintptr_t)&FS & ~(uintptr_t)(pg - 1);
+        uintptr_t hi = ((uintptr_t)&FS + sizeof FS + (uintptr_t)pg - 1) & ~(uintptr_t)(pg - 1);
+        /* write one byte of each of the three lines (back the page, no read-only zero page, no copy-on-write
+         * later); the value written is the one already there */
+        for (unsigned ln = 0; ln < sizeof FS; ln += 64) { volatile uint8_t *q = (volatile uint8_t *)&FS + ln; *q = *q; }
+        pin_dlo = lo; pin_dhi = hi;
+        pin_dlocked = mlock((const void *)lo, hi - lo) == 0;
+    }
+    LOG("code pages: %d segments, %d KB, %s; filter data: %d page(s), %s", pin_n, pin_bytes / 1024,
+        pin_n == 0 ? "not found" : ok ? "locked in memory (mlock)" : "mlock refused: touched from the tick instead",
+        (int)((pin_dhi - pin_dlo) / (uintptr_t)(sysconf(_SC_PAGESIZE) > 0 ? sysconf(_SC_PAGESIZE) : 4096)),
+        pin_dlocked ? "locked" : "mlock refused: touched from the tick instead");
+}
+static void pin_keepwarm(void)
+{
+    if ((pin_locked && pin_dlocked) || (tick_no & 7)) return;
+    long pg = sysconf(_SC_PAGESIZE); if (pg <= 0) pg = 4096;
+    uint8_t acc = 0;
+    if (!pin_locked)
+        for (int i = 0; i < pin_n; i++)
+            for (uintptr_t a = pin_seg[i].lo; a < pin_seg[i].hi; a += (uintptr_t)pg) acc ^= *(volatile const uint8_t *)a;
+    if (!pin_dlocked)
+        for (unsigned ln = 0; ln < sizeof FS; ln += 64) acc ^= *((volatile const uint8_t *)&FS + ln);
+    pin_sink = acc;
 }
 
 /* ---- tick-side caches ---- */
@@ -778,14 +1211,40 @@ static int64_t cue_in(const void *c)  { return *(const int64_t *)((const uint8_t
 static int64_t cue_out(const void *c) { return *(const int64_t *)((const uint8_t *)c + CUE_OUT_TIME); }
 static const char *src_name(int s)
 {
-    return s == SRC_CALL ? "call" : s == SRC_LOAD ? "load" : s == SRC_STORE ? "store" : "setout";
+    return s == SRC_CALL ? "call" : s == SRC_LOAD ? "load" : s == SRC_STORE ? "store" :
+           s == SRC_DELETE ? "delete" : "setout";
 }
 
 /* 0.2.1: loops read from ANLZ are in ms, so match within MATCH_TOL units (~2 ms) */
 #define MATCH_TOL 100
-static uint8_t mem_flag[NDECK][NMEM];   /* 0.2.2: rekordbox Active Loop flag (from ANLZ) */
+static uint8_t mem_flag[NDECK][NMEM];   /* 0.2.2: rekordbox Active Loop flag (from ANLZ); 0.2.9: also the flag we set */
+#define OWN_NONE 0
+#define OWN_PEND 1                      /* stored by SHIFT+pad this session, read-back not confirmed yet */
+#define OWN_OK   2                      /* stored by SHIFT+pad this session AND confirmed in the ANLZ read-back */
+static uint8_t mem_mine[NDECK][NMEM];   /* 0.2.10: OWN_*. The mod deletes a memory loop ONLY when this is OWN_OK (never one it did not make and verify) */
 static uint8_t mem_syn[NDECK][NMEM];    /* 1 = built from ANLZ (template + in/out), not yet seen live */
 static int near(int64_t a, int64_t b) { int64_t x = a - b; return x <= MATCH_TOL && x >= -MATCH_TOL; }
+/* 0.2.8: delete matching. The ANLZ-built memory loop can sit ~0.2 s off the firmware's cue
+ * (AZ-EMU al028: 06:33.5 vs 06:33.7), so deletes match by the nearest in/out within 0.5 s. */
+#define DEL_TOL 22050
+static int near_del(int64_t a, int64_t b) { int64_t x = a - b; return x <= DEL_TOL && x >= -DEL_TOL; }
+
+/* ---- 0.2.8: deleteCue OBSERVER (0x861218) ----
+ * CueCallManager::deleteCue is the PERSISTENCE half of a cue delete (it queues the delete for the
+ * rekordbox DB / ANLZ writer). The live hot cue is cleared earlier, by CueLoopSetFacade::clearCue
+ * (0x1431720), so swallowing deleteCue cannot stop a delete (AZ-EMU al028: "-> arm" logged and the
+ * hot cue was gone anyway). The hook therefore never changes behaviour: it copies (kind, cue) into
+ * the ring and calls the original. The tick uses it to drop its stale copy of a deleted cue and to
+ * clear the Active Loop when that loop was deleted. Mod row off: pure pass-through, no event. */
+typedef void (*delete_fn)(void *mgr, int kind, const void *cue);
+static delete_fn orig_delete;
+static void my_delete(void *mgr, int kind, const void *cue)
+{
+    if (plausible((uintptr_t)mgr)) __atomic_store_n(&mgr_any, mgr, __ATOMIC_RELAXED);
+    if (__atomic_load_n(&al_live, __ATOMIC_ACQUIRE) && row_on())
+        (void)push_ev(NULL, kind, SRC_DELETE, cue);
+    orig_delete(mgr, kind, cue);
+}
 static int mem_find(int d, const void *c)
 {
     int64_t in = cue_in(c), out = cue_out(c);
@@ -818,7 +1277,7 @@ static int mem_put(int d, const void *c)
     memset(mem_buf[d][i], 0, CUE_SIZE);
     fw_cue_copy(mem_buf[d][i], c);
     mem_ok[d][i] = 1;
-    if (fresh) mem_flag[d][i] = 0;
+    if (fresh) { mem_flag[d][i] = 0; mem_mine[d][i] = 0; }
     return i;
 }
 static void hot_put(int d, int k, const void *c)
@@ -835,6 +1294,7 @@ static void mem_reset(int d)
     memset(mem_live[d], 0, sizeof mem_live[d]);
     memset(mem_syn[d], 0, sizeof mem_syn[d]);
     memset(mem_flag[d], 0, sizeof mem_flag[d]);
+    memset(mem_mine[d], 0, sizeof mem_mine[d]);
     last_call_ok[d] = 0;
     mem_n[d] = 0; last_mem[d] = -1;
     for (int k = 0; k < NHOT; k++) {
@@ -879,19 +1339,21 @@ static void base_note(int d, const ev_t *e)
     if (!tk_kok[d]) LOG("deck %d: source key from a %s cue (kind %d)", d + 1, e->src == SRC_LOAD ? "load" : "call", e->kind);
     tk_kok[d] = 1;
 }
+static void on_delete_ev(ev_t *e);
 static void handle_ev(ev_t *e)
 {
     int d = -1;
+    e->t_ns = (uint64_t)((int64_t)cnt_to_ns(e->t_ns) + ring_off);    /* hook counter -> tick clock */
+    if (e->src == SRC_DELETE) { on_delete_ev(e); return; }
     if (e->src == SRC_STORE) {
         static int store_armed;
         if (!store_armed) { store_armed = 1; LOG("store armed (store=%p)", __atomic_load_n(&store_any, __ATOMIC_ACQUIRE)); }
         d = press_deck_for(e->t_ns);          /* the MEMORY press side, never a default */
-        if (d < 0) { LOG("store kind=%d: no single recent press, not attributed", e->kind); return; }
+        if (d < 0) { LOGC("store kind=%d: no single recent press, not attributed", e->kind); return; }
     } else {
         d = deck_of_facade(e->facade, e->src, e->t_ns);
         if (d >= 0 && e->src == SRC_LOAD) {
-            if (!last_load_tick[d] || tick_no - last_load_tick[d] > 60) track_changed(d, "load events");
-            last_load_tick[d] = tick_no;
+            load_cue_seen(d);
         }
     }
     int loop = e->has_cue && fw_is_loop(e->cue);
@@ -905,20 +1367,30 @@ static void handle_ev(ev_t *e)
         if (c && fw_is_loop(c)) hot_put(d, e->kind, c);
         return;
     }
-    LOG("%s deck %d kind=%d loop=%d", src_name(e->src), d + 1, e->kind, loop);
+    LOGC("%s deck %d kind=%d loop=%d", src_name(e->src), d + 1, e->kind, loop);
     if (e->src == SRC_LOAD || e->src == SRC_CALL) base_note(d, e);
     if (e->kind == KIND_MEM && e->has_cue && (e->src == SRC_CALL || e->src == SRC_STORE)) {
         last_call_in[d] = cue_in(e->cue); last_call_out[d] = cue_out(e->cue); last_call_ok[d] = 1;
     }
-    if (!loop) return;
+    if (!loop) {
+        /* 0.2.8: the firmware now holds a point cue (or nothing) in this hot slot, so a loop we
+         * cached for it is stale (a delete or overwrite that did not reach the delete hook). */
+        if (e->kind >= 1 && e->kind <= 8 && hot_ok[d][e->kind]) {
+            LOG("deck %d: hot cue %d is no longer a loop (%s), dropped from the loop list", d + 1, e->kind, src_name(e->src));
+            fw_cue_dtor(hot_buf[d][e->kind]); hot_ok[d][e->kind] = 0;
+        }
+        return;
+    }
     if (e->kind == KIND_MEM) {
         int i = mem_put(d, e->cue);
         if (mem_syn[d][i]) LOG("deck %d: ANLZ memory loop #%d now seen live (real cue replaces the built one)", d + 1, i);
         mem_live[d][i] = 1; mem_syn[d][i] = 0;
-        if (del_pend_ok[d] && near(cue_in(e->cue), del_pend_in[d]) && near(cue_out(e->cue), del_pend_out[d])) {
-            del_pend_ok[d] = 0;
-            LOG("deck %d: memory cue in=%lld out=%lld seen again -> stock DELETE did not remove it", d + 1,
-                (long long)del_pend_in[d], (long long)del_pend_out[d]);
+        {   /* 0.2.9 evidence for the AZ-EMU run: the flag byte the firmware itself hands us (logged, never acted on) */
+            static unsigned e1_log;
+            if ((e->cue[CP_FLAG] || e->src == SRC_STORE) && e1_log < 24) {
+                e1_log++;
+                LOG("deck %d: live memory loop #%d (%s) CueProperty+0xe1=%u, ANLZ flag=%u", d + 1, i, src_name(e->src), e->cue[CP_FLAG], mem_flag[d][i]);
+            }
         }
         if (e->src != SRC_LOAD) last_mem[d] = i;
         else if (last_mem[d] < 0) last_mem[d] = i;
@@ -929,6 +1401,7 @@ static void handle_ev(ev_t *e)
 
 static void drain_ring(void)
 {
+    ring_off = (int64_t)now_ns() - (int64_t)cnt_to_ns(cnt_now());
     for (int n = 0; n < RING; n++) {
         uint32_t w = __atomic_load_n(&ring_w, __ATOMIC_ACQUIRE);
         if (ring_r == w) break;
@@ -986,12 +1459,33 @@ static void *holder_of(int d)
 static int64_t  active_in[NDECK], active_out[NDECK];
 static uint32_t active_cid[NDECK];
 static int      restore_pending[NDECK];
+/* 0.2.8 al028f: the Active Loop of the PREVIOUS load of a deck, kept only to restore it when the same track is loaded again
+ * (the live armed state - act_ok / active_* / arm_in - is always cleared on a content change, so an old track's loop can
+ * never be armed, engaged or counted on a new one). */
+static uint8_t  rem_buf[NDECK][CUE_SIZE] __attribute__((aligned(64)));
+static uint8_t  rem_ok[NDECK];
+static uint32_t rem_cid[NDECK];
+static int64_t  rem_in[NDECK], rem_out[NDECK];
+static uint8_t  clear_owed[NDECK];        /* tick: the firmware's Active Loop of this deck must be cleared (a track change dropped ours) */
+static uint8_t  tc_seen[NDECK];           /* load_changed: a load was handled for this deck ... */
+static long     tc_tick[NDECK];           /* ... at this tick ... */
+static uint32_t tc_cid[NDECK];            /* ... with this content id (0 = not known yet) */
+static const char *ld_pend[NDECK];        /* "track loaded" line waiting for the content id */
+static long     ld_pend_tick[NDECK];
 static uint32_t deck_evt;   /* atomic: deck-event flags for tick */
 static uint32_t deck_cid(int d)
 {
     az_deck_info di; memset(&di, 0, sizeof di); di.size = sizeof di;
     if (!AZ_HAS(C, deck_info) || C->deck_info(d, &di) != 0 || !di.loaded) return 0;
     return di.content_id;
+}
+/* al028g: the content id of the load in progress. The load cues run BEFORE the deck reports the new track, so for about a second
+ * after the last load cue deck_cid() still says the PREVIOUS track: it is not used then (0 = not known yet). Once no load cue has
+ * come for 60 ticks (1 s) it is the id try_restore and anlz_service use. Every id the load code keeps or logs comes from here. */
+static uint32_t load_id(int d)
+{
+    if (last_load_tick[d] && tick_no - last_load_tick[d] < 60) return 0;
+    return deck_cid(d);
 }
 static void ready_sched(int d)
 {
@@ -1043,6 +1537,7 @@ static void ready_flush(void)
 typedef struct { int32_t hot; uint32_t in_ms, out_ms; int32_t flag; } al_t;   /* flag: rekordbox Active Loop (PCPT status 4) */
 typedef struct {
     uint32_t cid; int n; al_t e[NAL];
+    int memcues;                            /* 0.2.10: memory cues (points AND loops) in the file: the firmware's 10-cue limit counts both */
     char msg[200];
 } anlz_res_t;
 static anlz_res_t anlz_res[NDECK];          /* worker writes while state==1, tick after ==2/3 */
@@ -1162,7 +1657,7 @@ static int ix_build(const char *root)
     return ix_n;
 }
 /* loops from one ANLZ file: PCO2 (EXT) or PCOB (DAT) */
-static int anlz_loops(const uint8_t *b, long n, al_t *e, int cap, int *nn)
+static int anlz_loops(const uint8_t *b, long n, al_t *e, int cap, int *nn, int *nmem)
 {
     if (n < 28 || memcmp(b, "PMAI", 4)) return -1;
     uint32_t off = be32(b + 4);
@@ -1181,9 +1676,11 @@ static int anlz_loops(const uint8_t *b, long n, al_t *e, int cap, int *nn)
                 if (le < 12 || q + le > lt) break;
                 if (pco2 && !memcmp(c, "PCP2", 4) && le >= 0x1c) {
                     uint32_t hot = be32(c + 0x0c), ty = c[0x10], tin = be32(c + 0x14), tout = be32(c + 0x18);
+                    if (hot == 0 && ty >= 1 && ty <= 2 && nmem) ++*nmem;
                     if (ty == 2 && tout != 0xffffffffu && tout > tin && *nn < cap) e[(*nn)++] = (al_t){ (int32_t)hot, tin, tout, 0 };
                 } else if (pcob && !memcmp(c, "PCPT", 4) && le >= 0x28) {
                     uint32_t hot = be32(c + 0x0c), ty = c[0x1c], tin = be32(c + 0x20), tout = be32(c + 0x24);
+                    if (hot == 0 && ty >= 1 && ty <= 2 && nmem) ++*nmem;
                     /* 0.2.2: PCPT +0x10 status: 4 = rekordbox "Active Loop" (exactly one loop per
                      * track in all 36 DAT files with loops that we have; 0 on every other cue) */
                     int32_t act = be32(c + 0x10) == 4u;
@@ -1218,18 +1715,19 @@ static int find_cb(const az_track *t, void *user)
 static int anlz_dir_loops(const char *dir, anlz_res_t *r)
 {
     char p[700];
-    int got = -1; r->n = 0;
+    int got = -1; r->n = 0; r->memcues = 0;
     snprintf(p, sizeof p, "%s/ANLZ0000.EXT", dir);
     long n = slurp(p, anlz_buf, sizeof anlz_buf);
-    if (n > 0 && anlz_loops(anlz_buf, n, r->e, NAL, &r->n) == 0) got = 0;
+    if (n > 0 && anlz_loops(anlz_buf, n, r->e, NAL, &r->n, &r->memcues) == 0) got = 0;
     /* 0.2.2: the Active Loop flag only exists in PCPT (PCOB); EXT's PCO2 has none, so the DAT
      * is always read too: its flags are copied onto the EXT entries (same in/out within 2 ms),
      * or its entries are used when the EXT gave no loops. */
     {
-        static al_t dat[NAL]; int dn = 0;
+        static al_t dat[NAL]; int dn = 0, dmem = 0;
         snprintf(p, sizeof p, "%s/ANLZ0000.DAT", dir);
         n = slurp(p, anlz_buf, sizeof anlz_buf);
-        if (n > 0 && anlz_loops(anlz_buf, n, dat, NAL, &dn) == 0) {
+        if (n > 0 && anlz_loops(anlz_buf, n, dat, NAL, &dn, &dmem) == 0) {
+            if (dmem > r->memcues) r->memcues = dmem;                /* the firmware writes memory cues to the DAT: the larger count wins */
             if (got != 0 || r->n == 0) { memcpy(r->e, dat, sizeof(al_t) * (size_t)dn); r->n = dn; got = 0; }
             else
                 for (int i = 0; i < dn; i++) if (dat[i].flag)
@@ -1362,6 +1860,7 @@ static int pos_seen(int d)
 }
 static uint32_t rearm_cnt[NDECK];           /* atomic */
 static int      act_src_hot[NDECK];       /* tick: active came from a hot cue */
+static int      act_src_idx[NDECK];       /* tick: hot kind (1..8) or memory index it was armed from */
 static int      tk_engaged_ours[NDECK];
 
 typedef void *(*pos_in_fn)(void *cue);
@@ -1383,6 +1882,33 @@ static void active_note(int d, const uint8_t *cue, int hot)
     fw_cue_copy(act_buf[d], cue);
     act_ok[d] = 1;
     tk_engaged_ours[d] = 0;
+}
+static int spent[NDECK], ex_inside[NDECK], ex_past[NDECK];
+/* 0.2.7: one-shot diagnostics per armed loop (AZ-EMU D3 run: armed, never inside) */
+static int      dg_near[NDECK], dg_stall[NDECK];
+static int64_t  dg_pos[NDECK];
+static uint64_t dg_ns[NDECK];
+static void drop_rem(int d)
+{
+    if (rem_ok[d]) { fw_cue_dtor(rem_buf[d]); rem_ok[d] = 0; }
+    rem_cid[d] = 0;
+}
+/* A content change (or eject): the armed Active Loop of the old load stops being live NOW (act_ok = 0, so the tick no longer
+ * publishes it to the hook, counts it, watches it or lets Auto-advance use it) and, if it was still armed, the firmware's copy
+ * is cleared by loop_guard(). A copy is kept in rem_* for the restore of a reload of the SAME track; a loop that already
+ * exited (spent) is not kept. Nothing is kept for a deck that had nothing armed (an older remembered loop stays). */
+static void stash_active(int d)
+{
+    if (!act_ok[d]) return;
+    drop_rem(d);
+    if (!spent[d] && active_cid[d]) {
+        memset(rem_buf[d], 0, CUE_SIZE);
+        fw_cue_copy(rem_buf[d], act_buf[d]);
+        rem_ok[d] = 1; rem_cid[d] = active_cid[d]; rem_in[d] = active_in[d]; rem_out[d] = active_out[d];
+    }
+    if (!spent[d]) clear_owed[d] = 1;
+    fw_cue_dtor(act_buf[d]); act_ok[d] = 0; active_cid[d] = 0; spent[d] = 0;
+    ex_inside[d] = 0; ex_past[d] = 0; dg_near[d] = 0; dg_stall[d] = 0; dg_pos[d] = -1; dg_ns[d] = 0;
 }
 static void fmt_time(char *b, size_t n, int64_t samples)
 {
@@ -1424,7 +1950,7 @@ static void log_set_check(int d)
     if (plausible((uintptr_t)ls) && !safe_read((uintptr_t)ls, &probe, 8)) {
         reg = fw_ls_has_loop(ls) & 0xff; looping = fw_ls_looping(ls) & 0xff;
     }
-    LOG("set check deck %d: holder loop=%d, LoopState has-loop=%d looping=%d", d + 1, held, reg, looping);
+    LOGC("set check deck %d: holder loop=%d, LoopState has-loop=%d looping=%d", d + 1, held, reg, looping);
 }
 /* tick: finish / fall back */
 static void pend_service(void)
@@ -1433,8 +1959,7 @@ static void pend_service(void)
         uint32_t op = __atomic_load_n(&pend_op[d], __ATOMIC_ACQUIRE);
         if (op == OP_DONE) {
             __atomic_store_n(&pend_op[d], OP_IDLE, __ATOMIC_RELEASE);
-            LOG("deck %d: %s applied on the firmware playhead thread", d + 1, pend_why[d]);
-            log_set_check(d);
+            if (row_on()) { LOGC("deck %d: %s applied on the firmware playhead thread", d + 1, pend_why[d]); log_set_check(d); }
         } else if ((op == OP_SET || op == OP_CLEAR) && (!orig_echeck || tick_no - pend_tick[d] > 30)) {
             uint32_t exp = op;
             if (!__atomic_compare_exchange_n(&pend_op[d], &exp, OP_BUSY, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
@@ -1443,8 +1968,7 @@ static void pend_service(void)
             if (h) { if (op == OP_SET) fw_set(h, set_buf[d]); else fw_clear(h); }
             __atomic_store_n(&hk_need[d], 0, __ATOMIC_RELAXED);
             __atomic_store_n(&pend_op[d], OP_IDLE, __ATOMIC_RELEASE);
-            LOG("deck %d: %s applied from tick (playhead hook idle, deck stopped?)", d + 1, pend_why[d]);
-            log_set_check(d);
+            if (row_on()) { LOG("deck %d: %s applied from tick (playhead hook idle, deck stopped?)", d + 1, pend_why[d]); log_set_check(d); }
         }
     }
 }
@@ -1547,14 +2071,34 @@ static int64_t playhead(int d)
     return -1;
 }
 /* candidates: live (or ANLZ-built) memory loops + hot cue loops of this track */
+static void hot_refresh(int d);
+/* 0.2.8: the same loop can be stored as a memory loop and as a hot cue (same in/out). It is ONE
+ * loop for cycling and counting: a hot cue that repeats a live memory loop (or an earlier hot
+ * cue) is skipped, so "N loops ahead" is the number of stops SHIFT+MEMORY will really make. */
+static int hot_dup(int d, int k)
+{
+    int64_t in = cue_in(hot_buf[d][k]), out = cue_out(hot_buf[d][k]);
+    for (int i = 0; i < mem_n[d]; i++)
+        if (mem_ok[d][i] && mem_live[d][i] && fw_is_loop(mem_buf[d][i]) &&
+            near(cue_in(mem_buf[d][i]), in) && near(cue_out(mem_buf[d][i]), out)) return 1;
+    for (int j = 1; j < k; j++)
+        if (hot_ok[d][j] && fw_is_loop(hot_buf[d][j]) &&
+            near(cue_in(hot_buf[d][j]), in) && near(cue_out(hot_buf[d][j]), out)) return 1;
+    return 0;
+}
+static int hot_usable(int d, int k)
+{
+    return hot_ok[d][k] && fw_is_loop(hot_buf[d][k]) && !hot_dup(d, k);
+}
 static const uint8_t *next_ahead(int d, int64_t after, int *is_hot, int *idx)
 {
+    hot_refresh(d);
     const uint8_t *best = NULL; int64_t bi = 0;
     for (int i = 0; i < mem_n[d]; i++)
         if (mem_ok[d][i] && mem_live[d][i] && fw_is_loop(mem_buf[d][i]) && cue_in(mem_buf[d][i]) > after &&
             (!best || cue_in(mem_buf[d][i]) < bi)) { best = mem_buf[d][i]; bi = cue_in(best); *is_hot = 0; *idx = i; }
     for (int k = 1; k < NHOT; k++)
-        if (hot_ok[d][k] && fw_is_loop(hot_buf[d][k]) && cue_in(hot_buf[d][k]) > after &&
+        if (hot_usable(d, k) && cue_in(hot_buf[d][k]) > after &&
             (!best || cue_in(hot_buf[d][k]) < bi)) { best = hot_buf[d][k]; bi = cue_in(best); *is_hot = 1; *idx = k; }
     return best;
 }
@@ -1569,30 +2113,29 @@ static const uint8_t *next_flagged(int d, int64_t after, int *idx)
 }
 static int count_known(int d, int64_t after)
 {
+    hot_refresh(d);
     int n = 0;
     for (int i = 0; i < mem_n[d]; i++)
         if (mem_ok[d][i] && mem_live[d][i] && fw_is_loop(mem_buf[d][i]) && cue_in(mem_buf[d][i]) > after) n++;
     for (int k = 1; k < NHOT; k++)
-        if (hot_ok[d][k] && fw_is_loop(hot_buf[d][k]) && cue_in(hot_buf[d][k]) > after) n++;
+        if (hot_usable(d, k) && cue_in(hot_buf[d][k]) > after) n++;
     return n;
 }
-static int spent[NDECK], ex_inside[NDECK], ex_past[NDECK];
-/* 0.2.7: one-shot diagnostics per armed loop (AZ-EMU D3 run: armed, never inside) */
-static int      dg_near[NDECK], dg_stall[NDECK];
-static int64_t  dg_pos[NDECK];
-static uint64_t dg_ns[NDECK];
-static void pick_and_set(int d, const uint8_t *c, int hot, int idx, const char *why)
+static int pick_quiet;   /* 0.2.8: caller toasts itself */
+static int pick_and_set(int d, const uint8_t *c, int hot, int idx, const char *why)
 {
     char t[32]; fmt_time(t, sizeof t, cue_in(c));
-    if (request(d, OP_SET, c, why) != 0) { LOG("deck %d: set busy, try again", d + 1); return; }
+    if (request(d, OP_SET, c, why) != 0) { LOG("deck %d: set busy, try again", d + 1); return -1; }
     active_note(d, c, hot);
+    act_src_idx[d] = idx;
     spent[d] = 0; ex_inside[d] = 0; ex_past[d] = 0;
     dg_near[d] = 0; dg_stall[d] = 0; dg_pos[d] = -1; dg_ns[d] = 0;
     if (!hot) last_mem[d] = idx;
     LOG("deck %d: Active Loop <- %s %d%s at %s in=%lld out=%lld (%s), queued for the playhead thread",
         d + 1, hot ? "hot cue" : "memory", idx, (!hot && mem_syn[d][idx]) ? " (from ANLZ)" : "", t,
         (long long)cue_in(c), (long long)cue_out(c), why);
-    toastf(hot ? "Active Loop: hot cue at %s" : "Active Loop: memory loop at %s", t);
+    if (!pick_quiet) toastf(hot ? "Active Loop: hot cue at %s" : "Active Loop: memory loop at %s", t);
+    return 0;
 }
 
 /* SHIFT+MEMORY: cycles through the stored loops ahead, starting after the queued/Active one
@@ -1630,14 +2173,595 @@ static void set_active_mem(int d, int i, const char *why)
     if (!mem_ok[d][i]) { LOG("set abort: deck %d memory #%d not constructed", d + 1, i); return; }
     pick_and_set(d, mem_buf[d][i], 0, i, why);
 }
+static int clear_active(int d, const char *why)
+{
+    if (request(d, OP_CLEAR, NULL, why) != 0) { LOG("deck %d: clear busy, try again", d + 1); return -1; }
+    if (act_ok[d]) { fw_cue_dtor(act_buf[d]); act_ok[d] = 0; }
+    active_cid[d] = 0; restore_pending[d] = 0; spent[d] = 0; drop_rem(d);
+    LOGC("cleared deck %d (queued)", d + 1);
+    return 0;
+}
 static void apply_clear(int d)
 {
     if (!holder_of(d)) { LOG("clear abort: deck %d not bound", d + 1); do_toast("Active Loop: deck not ready"); return; }
-    if (request(d, OP_CLEAR, NULL, "clear") != 0) { LOG("deck %d: clear busy, try again", d + 1); return; }
-    if (act_ok[d]) { fw_cue_dtor(act_buf[d]); act_ok[d] = 0; }
-    active_cid[d] = 0; restore_pending[d] = 0; spent[d] = 0;
-    LOG("cleared deck %d (queued)", d + 1);
-    do_toast("Active Loop cleared");
+    if (clear_active(d, "clear") == 0) do_toast("Active Loop cleared");
+}
+
+/* ---- 0.2.9: ACTIVE LOOP PERSISTENCE ----
+ * The rekordbox Active Loop is a flag on a MEMORY loop (CueProperty+0xe1 == 1; the firmware converts it to Cue+0x28 only for
+ * memory cues, and ActiveLoopUpdater 0x9a2e40 scans the MemoryCueSet only). A hot cue can never carry it. So SHIFT+pad keeps
+ * the Active Loop by storing a memory-kind copy of the loop with that flag, through the firmware's own store function
+ * (0x86b410 = the call stock MEMORY makes) and removes it again through the firmware's own memory delete (0x86b3f8 = what
+ * deleteCue's task calls). The mod writes no file: the firmware's cue write-back (database / ANLZ) does the persisting.
+ * One flagged loop per track: the previous one is un-flagged first (delete + store without the flag).
+ * Everything here runs in the tick. The jobs are run one per PJ_GAP ticks, in order. */
+#define VA_STORE_DEL ((uintptr_t)0x86b3f8u)   /* CueStoreMaintainer: delete a MEMORY cue (store, const CueProperty&) */
+typedef void (*store_del_fn)(void *store, const void *cue);
+static store_del_fn fw_store_del;
+#define PJ_DEL    1
+#define PJ_STORE  2
+#define NPJ       8
+#define PJ_GAP    4                             /* ticks between two jobs (~130 ms) */
+#define PV_DELAY  150                           /* ticks after the last job: read the ANLZ back (read-only) and log */
+typedef struct {
+    int op, d, must;                            /* must: second half of a pair, runs even if the track changed */
+    uint32_t cid;
+    uint8_t cue[CUE_SIZE] __attribute__((aligned(64)));
+} pjob_t;
+static pjob_t   pj[NPJ];
+static int      pj_r, pj_cnt;
+static long     pj_due;
+static unsigned pj_nstore, pj_ndel;             /* counters for the log / tests */
+static long     pv_due[NDECK];                  /* tick the read-back is due (0 = none) */
+static int      pv_active[NDECK];
+static int64_t  pv_in[NDECK], pv_out[NDECK];
+static int      pv_want[NDECK];                 /* 1: a flagged loop at pv_in/pv_out is expected, 0: none expected there */
+static int      pv_pre[NDECK];                  /* 0.2.10: memory loops the ANLZ must hold after our store (ownership check) */
+static int      pv_idx[NDECK] = { -1, -1, -1, -1 };   /* 0.2.10: cache slot of the copy we stored (-1 none) */
+_Static_assert(NDECK == 4, "pv_idx initialiser");
+
+/* 0.2.10: the real CueStoreMaintainer is recognised by its own vtable (primary vtable = slot 0 at 0x2951330; 0x86b410 and 0x86b3f8
+ * are plain members, NOT vtable slots: the 0.2.9 check looked for them there and refused the genuine object) or by its task queue
+ * (*(store+0x150) is an object whose vtable slot 0 is 0x86ff40, the test 0x86b410 itself makes). */
+#define VT_CSM    ((uintptr_t)0x2951330u)
+#define VA_QUEUE0 ((uintptr_t)0x86ff40u)
+static int store_vt_ok(uintptr_t store)
+{
+    uintptr_t vp = 0;
+    if (!plausible(store) || (store & 7) || safe_read(store, &vp, sizeof vp) != 0) return 0;
+    if (vp == VT_CSM) return 1;
+    uintptr_t q = 0, qv = 0, q0 = 0;
+    if (safe_read(store + 0x150, &q, sizeof q) != 0 || !plausible(q) || (q & 7)) return 0;
+    if (safe_read(q, &qv, sizeof qv) != 0 || !plausible(qv)) return 0;
+    return safe_read(qv, &q0, sizeof q0) == 0 && q0 == VA_QUEUE0;
+}
+/* the CueStoreMaintainer: seen as the first argument of 0x86b410 (any stock store), else found from the CueCallManager that
+ * deleteCue ran on: *(mgr + 0x140) is the field the delete task passes to 0x86b3f8; if that field fails the check the manager's
+ * first 0x400 bytes are scanned for exactly one pointer that passes it. NULL = not known yet. */
+static void *store_ptr(void)
+{
+    if (!fw_store_del) return NULL;
+    void *s = __atomic_load_n(&store_any, __ATOMIC_ACQUIRE);
+    if (s) return s;
+    void *m = __atomic_load_n(&mgr_any, __ATOMIC_ACQUIRE);
+    if (!m || !plausible((uintptr_t)m)) return NULL;
+    static int logged, failed;
+    uintptr_t p = safe_ptr((uintptr_t)m + 0x140), how = 0x140;
+    if (!p || !store_vt_ok(p)) {
+        uintptr_t found = 0; int nfound = 0;
+        for (uintptr_t off = 0; off < 0x400; off += 8) {
+            uintptr_t c = safe_ptr((uintptr_t)m + off);
+            if (c && store_vt_ok(c)) { if (c != found) nfound++; found = c; how = off; }
+        }
+        if (nfound != 1) {
+            if (!failed) { failed = 1; LOG("store pointer: CueCallManager %p known, +0x140 = %p fails the check, scan found %d candidates", m, (void *)p, nfound); }
+            return NULL;
+        }
+        p = found;
+    }
+    if (!logged) { logged = 1; LOG("store pointer %p taken from the CueCallManager %p (+%#lx, checked by its vtable/queue)", (void *)p, m, (unsigned long)how); }
+    return (void *)p;
+}
+/* does a stored/unflagged loop of this deck belong to one pad's extent? (pad = firmware cue, memory entry = firmware or ANLZ-built) */
+static int ext_loose(const void *a, int64_t in, int64_t out)
+{
+    return near_del(cue_in(a), in) && near_del(cue_out(a), out);
+}
+static int mem_loop_ok(int d, int i)
+{
+    return mem_ok[d][i] && (mem_live[d][i] || mem_syn[d][i]) && fw_is_loop(mem_buf[d][i]);
+}
+/* the memory loop carrying the flag (rekordbox's or ours); -1 none. A memory loop the firmware showed us live wins over a built one. */
+static int flagged_idx(int d)
+{
+    int best = -1;
+    for (int i = 0; i < mem_n[d]; i++)
+        if (mem_loop_ok(d, i) && mem_flag[d][i]) { if (best < 0 || (mem_live[d][i] && !mem_syn[d][i])) best = i; }
+    return best;
+}
+/* the memory loop with the same extent as pad cue c: exact (near) among live ones, within 0.5 s for an ANLZ-built one */
+static int mem_ident(int d, const void *c)
+{
+    int64_t in = cue_in(c), out = cue_out(c); int best = -1;
+    for (int i = 0; i < mem_n[d]; i++) {
+        if (!mem_loop_ok(d, i)) continue;
+        if (mem_live[d][i] && !mem_syn[d][i]) { if (near(cue_in(mem_buf[d][i]), in) && near(cue_out(mem_buf[d][i]), out)) return i; }
+        else if (near_del(cue_in(mem_buf[d][i]), in) && near_del(cue_out(mem_buf[d][i]), out)) best = i;
+    }
+    return best;
+}
+static int live_loops(int d)
+{
+    int n = 0;
+    for (int i = 0; i < mem_n[d]; i++) n += mem_loop_ok(d, i);
+    return n;
+}
+static void mem_drop(int d, int i)       /* forget a memory loop (the job queue deletes it in the firmware) */
+{
+    if (mem_ok[d][i]) { fw_cue_dtor(mem_buf[d][i]); mem_ok[d][i] = 0; }
+    mem_live[d][i] = 0; mem_syn[d][i] = 0; mem_flag[d][i] = 0; mem_mine[d][i] = 0;
+    if (last_mem[d] == i) last_mem[d] = -1;
+}
+static int pj_push(int op, int d, uint32_t cid, const void *src, int flag, int must)
+{
+    if (pj_cnt >= NPJ) return -1;
+    pjob_t *j = &pj[(pj_r + pj_cnt) % NPJ];
+    memset(j, 0, sizeof *j);
+    j->op = op; j->d = d; j->cid = cid; j->must = must;
+    fw_cue_copy(j->cue, src);
+    if (flag >= 0) j->cue[CP_FLAG] = (uint8_t)flag;
+    pj_cnt++;
+    return 0;
+}
+static void pv_note(int d, int64_t in, int64_t out, int want)
+{
+    pv_in[d] = in; pv_out[d] = out; pv_want[d] = want; pv_due[d] = tick_no + PV_DELAY + PJ_GAP * (pj_cnt + 1);
+}
+/* tick: one job per PJ_GAP ticks */
+static void pj_service(void)
+{
+    if (!pj_cnt || tick_no < pj_due) return;
+    pjob_t *j = &pj[pj_r % NPJ];
+    int d = j->d; char t[32]; fmt_time(t, sizeof t, cue_in(j->cue));
+    void *store = store_ptr();
+    if (!store) {
+        if (j->op == PJ_STORE && j->must) { pj_due = tick_no + 30; return; }     /* never lose the second half: wait */
+        LOG("deck %d: persist job (%s at %s) dropped: no store pointer", d + 1, j->op == PJ_STORE ? "store" : "delete", t);
+    } else if (!j->must && deck_cid(d) != j->cid) {
+        LOG("deck %d: persist job (%s at %s) dropped: another track is loaded now", d + 1, j->op == PJ_STORE ? "store" : "delete", t);
+    } else if (j->op == PJ_DEL) {
+        fw_store_del(store, j->cue); pj_ndel++;
+        LOG("deck %d: persist: memory loop %s in=%lld out=%lld deleted through the firmware (0x86b3f8)", d + 1, t,
+            (long long)cue_in(j->cue), (long long)cue_out(j->cue));
+    } else {
+        orig_store(store, 0, j->cue); pj_nstore++;
+        LOG("deck %d: persist: memory loop %s in=%lld out=%lld stored through the firmware (0x86b410), Active Loop flag=%d", d + 1, t,
+            (long long)cue_in(j->cue), (long long)cue_out(j->cue), j->cue[CP_FLAG]);
+    }
+    fw_cue_dtor(j->cue);
+    pj_r = (pj_r + 1) % NPJ; pj_cnt--;
+    pj_due = tick_no + PJ_GAP;
+}
+/* ---- 0.2.10: what the firmware does, and the rule the mod keeps ----
+ * Read from the firmware (CacheableCueInfo::doRegisterCue 0x1890808, doDeregisterCue 0x1887870):
+ *  - a store whose kind and in/out (compared in whole ms) equal a memory cue that exists is IGNORED, flag or not: there is no
+ *    "set the flag in place" path, a same-extent store never changes the stored loop;
+ *  - storing a FLAGGED memory loop DELETES every other flagged memory loop of the track (single Active Loop rule: the old one is
+ *    deregistered, not un-flagged);
+ *  - a delete removes the cue whose kind and in/out (whole ms) match, flagged or not;
+ *  - at most 10 memory cues (points and loops together).
+ * So the mod NEVER deletes a memory loop it did not itself store in this session and confirm in the ANLZ read-back (OWN_OK),
+ * and it never stores a flagged loop while another flagged loop it does not own would be deleted by the firmware for it.
+ * In those cases the loop is armed only and the toast says why. */
+static uint32_t anlz_for[NDECK];     /* content id requested for this load (0 = not yet) */
+static int owned(int d, int i) { return mem_ok[d][i] && mem_mine[d][i] == OWN_OK; }
+/* the ANLZ of the loaded track is read and current: the loops/flags/cue count in anlz_res[d] can be trusted for this track */
+static int anlz_ready(int d, uint32_t cid)
+{
+    return __atomic_load_n(&anlz_state[d], __ATOMIC_ACQUIRE) == 2u && anlz_res[d].cid == cid && anlz_for[d] == cid;
+}
+static int ms_near(uint32_t ms, int64_t samples) { return near_del((int64_t)(ms * 44.1), samples); }
+/* ANLZ memory loop within DEL_TOL of [in,out] (-1 none); *flag gets its rekordbox flag */
+static int anlz_twin(int d, int64_t in, int64_t out, int *flag)
+{
+    for (int i = 0; i < anlz_res[d].n; i++) {
+        const al_t *e = &anlz_res[d].e[i];
+        if (e->hot) continue;
+        if (ms_near(e->in_ms, in) && ms_near(e->out_ms, out)) { if (flag) *flag = e->flag != 0; return i; }
+    }
+    return -1;
+}
+/* memory loops the ANLZ will hold: its own list, plus live ones (stock MEMORY since the last read) that it does not list yet */
+static int mem_loops_expected(int d)
+{
+    int n = 0;
+    for (int i = 0; i < anlz_res[d].n; i++) n += !anlz_res[d].e[i].hot;
+    for (int i = 0; i < mem_n[d]; i++)
+        if (mem_loop_ok(d, i) && mem_live[d][i] && !mem_syn[d][i] && anlz_twin(d, cue_in(mem_buf[d][i]), cue_out(mem_buf[d][i]), NULL) < 0) n++;
+    return n;
+}
+/* a flagged memory loop (cache or ANLZ) that is not ours-and-confirmed: the firmware would delete it for a new flag */
+static int foreign_flag(int d, int64_t *in)
+{
+    for (int i = 0; i < mem_n[d]; i++)
+        if (mem_loop_ok(d, i) && mem_flag[d][i] && !owned(d, i)) { if (in) *in = cue_in(mem_buf[d][i]); return 1; }
+    for (int i = 0; i < anlz_res[d].n; i++) {
+        const al_t *e = &anlz_res[d].e[i];
+        if (e->hot || !e->flag) continue;
+        int mine = 0;
+        for (int k = 0; k < mem_n[d]; k++)
+            if (owned(d, k) && mem_flag[d][k] && ms_near(e->in_ms, cue_in(mem_buf[d][k])) && ms_near(e->out_ms, cue_out(mem_buf[d][k]))) mine = 1;
+        if (!mine) { if (in) *in = (int64_t)(e->in_ms * 44.1); return 1; }
+    }
+    return 0;
+}
+/* SHIFT+pad, first press: keep this pad's loop as the Active Loop. */
+#define PS_OK 0
+#define PS_NOSTORE 1
+#define PS_FULL 2
+#define PS_BUSY 3
+#define PS_HAVE 4                       /* an Active Loop flag already sits on a memory loop of this extent: nothing to store */
+#define PS_TWIN 5                       /* an UNflagged memory loop of this extent exists: the firmware would ignore a store */
+#define PS_FOREIGN 6                    /* another flagged loop we do not own: the firmware would delete it */
+#define PS_NOCHK 7                      /* the track's stored loops are not read yet: cannot check */
+static int persist_set(int d, const uint8_t *c)
+{
+    uint32_t cid = load_id(d);               /* 0 while a load is landing: the cue lists are not this track's yet */
+    if (!cid) return PS_BUSY;
+    char t[32]; fmt_time(t, sizeof t, cue_in(c));
+    if (!anlz_ready(d, cid)) { LOG("deck %d: Active Loop not saved: this track's stored loops are not read yet (cannot check for a same-extent loop or another flag)", d + 1); return PS_NOCHK; }
+    int m = mem_ident(d, c), af = 0, at = anlz_twin(d, cue_in(c), cue_out(c), &af);
+    if (m >= 0 || at >= 0) {
+        if ((m >= 0 && mem_flag[d][m]) || (at >= 0 && af)) { LOG("deck %d: Active Loop at %s is already flagged on a stored memory loop: nothing to store", d + 1, t); return PS_HAVE; }
+        LOG("deck %d: Active Loop at %s NOT saved: a memory loop with the same in/out already exists and the firmware ignores a same-extent store (it has no set-flag-in-place path); the mod never deletes a loop it did not store", d + 1, t);
+        return PS_TWIN;
+    }
+    if (!store_ptr()) { LOG("deck %d: Active Loop not saved: no store pointer yet (a stock MEMORY press or any cue delete gives it)", d + 1); return PS_NOSTORE; }
+    int64_t fin = 0;
+    if (foreign_flag(d, &fin)) {
+        char tf[32]; fmt_time(tf, sizeof tf, fin);
+        LOG("deck %d: Active Loop at %s NOT saved: the track already has a flagged memory loop at %s that this mod did not store; the firmware deletes the old flagged loop when a new one is flagged, so nothing is stored", d + 1, t, tf);
+        return PS_FOREIGN;
+    }
+    if (pj_cnt + 2 > NPJ) { LOG("deck %d: Active Loop not saved: earlier persist jobs still queued", d + 1); return PS_BUSY; }
+    int fi = flagged_idx(d);                 /* ours and confirmed (foreign_flag was 0): the firmware removes it when the new flag is stored */
+    int pts = anlz_res[d].memcues - 0; { int ml = 0; for (int i = 0; i < anlz_res[d].n; i++) ml += !anlz_res[d].e[i].hot; pts -= ml; if (pts < 0) pts = 0; }
+    int est = mem_loops_expected(d) + pts - (fi >= 0 ? 1 : 0);
+    if (est >= MEM_SOFT_CAP) {
+        LOG("deck %d: Active Loop not saved: the memory list holds %d cues (%d loops + %d points, cap %d)", d + 1, est, est - pts, pts, MEM_SOFT_CAP);
+        return PS_FULL;
+    }
+    pv_pre[d] = mem_loops_expected(d) + 1 - (fi >= 0 ? 1 : 0);
+    pj_push(PJ_STORE, d, cid, c, 1, 0);
+    int idx = mem_put(d, c);
+    mem_buf[d][idx][CP_FLAG] = 1; mem_live[d][idx] = 1; mem_syn[d][idx] = 0; mem_flag[d][idx] = 1; mem_mine[d][idx] = OWN_PEND;
+    if (fi >= 0 && fi != idx) {
+        char to[32]; fmt_time(to, sizeof to, cue_in(mem_buf[d][fi]));
+        LOG("deck %d: the firmware replaces our earlier saved loop at %s with this one", d + 1, to);
+        mem_drop(d, fi);
+    }
+    LOG("deck %d: Active Loop: a flagged memory copy of the pad's loop at %s is stored (%d memory loops expected after the store)", d + 1, t, pv_pre[d]);
+    pv_note(d, cue_in(c), cue_out(c), 1);
+    pv_idx[d] = idx;
+    return PS_OK;
+}
+/* SHIFT+pad again on the armed pad, or DELETE+pad: take OUR saved flag away. Only a copy this mod stored this session and
+ * confirmed in the read-back is deleted; anything else stays (its flag too). */
+#define PC_NONE 0                       /* no flagged loop of that extent */
+#define PC_DONE 1                       /* our confirmed copy: delete queued */
+#define PC_KEPT 2                       /* a flagged loop we do not own: left alone */
+#define PC_FAIL 3                       /* ours, but it cannot be removed now (no store pointer, queue busy) */
+static int persist_clear(int d, const uint8_t *c)
+{
+    int fi = flagged_idx(d);
+    if (fi < 0 || !ext_loose(mem_buf[d][fi], cue_in(c), cue_out(c))) return PC_NONE;
+    uint32_t cid = load_id(d);
+    if (!cid) return PC_NONE;
+    char t[32]; fmt_time(t, sizeof t, cue_in(mem_buf[d][fi]));
+    if (!owned(d, fi)) {
+        LOG("deck %d: the flagged memory loop at %s %s: left in place, flag included (the mod only deletes what it stored and confirmed this session)", d + 1, t,
+            mem_mine[d][fi] == OWN_PEND ? "was stored a moment ago and is not confirmed yet" : "was not stored by this mod in this session");
+        return PC_KEPT;
+    }
+    if (!store_ptr()) { LOG("deck %d: saved Active Loop at %s kept: no store pointer to delete it with", d + 1, t); return PC_FAIL; }
+    if (pj_cnt + 1 > NPJ) { LOG("deck %d: saved Active Loop at %s kept: earlier persist jobs still queued", d + 1, t); return PC_FAIL; }
+    int64_t in = cue_in(mem_buf[d][fi]), out = cue_out(mem_buf[d][fi]);
+    pj_push(PJ_DEL, d, cid, mem_buf[d][fi], -1, 0);
+    LOG("deck %d: Active Loop flag removed: our memory copy at %s is deleted", d + 1, t);
+    mem_drop(d, fi);
+    pv_note(d, in, out, 0); pv_idx[d] = -1;
+    return PC_DONE;
+}
+/* a hot cue loop of deck d was deleted (sweep after a deleteCue): OUR flagged memory copy with the same extent goes with it,
+ * unless another pad still holds that loop. Another flagged loop stays (logged). hot_buf[d][k] is still the deleted cue. */
+static void persist_hot_deleted(int d, int k)
+{
+    if (!hot_ok[d][k]) return;
+    int fi = flagged_idx(d);
+    if (fi < 0 || !ext_loose(mem_buf[d][fi], cue_in(hot_buf[d][k]), cue_out(hot_buf[d][k]))) return;
+    for (int j = 1; j <= 8; j++)
+        if (j != k && hot_ok[d][j] && fw_is_loop(hot_buf[d][j]) && ext_loose(mem_buf[d][fi], cue_in(hot_buf[d][j]), cue_out(hot_buf[d][j]))) return;
+    (void)persist_clear(d, hot_buf[d][k]);
+}
+
+/* ---- 0.2.8 tick side of the deleteCue observer ----
+ * deleteCue(this, kind, cue): `this` is the ONE shared CueCallManager (a SharedTaskDrivenThread,
+ * not one per deck) and the cue carries no player, so the hook cannot say which deck. Deck and
+ * identity come from state the tick can read instead:
+ *  - hot cue (kind 1..8): the deck whose LIVE hot-cue slot for that kind stopped being a loop
+ *    while we had it cached as one (ground truth: only the deck that was deleted from changes,
+ *    also when both decks hold the same track). The Active Loop is cleared only if it was armed
+ *    from THAT hot cue (kind identity), never by extent alone.
+ *  - memory cue (kind 0): the deck of the MEMORY/DELETE press, else the one deck that has a
+ *    matching memory loop (nearest in/out within 0.5 s); two candidates = unknown = nothing done.
+ *    The Active Loop is cleared only if it was armed from that memory loop (slot identity). */
+static long hot_dirty_until;            /* tick: a hot cue delete was seen; sweep the live slots until then */
+
+static void drop_hot(int d, int k)
+{
+    if (hot_ok[d][k]) { fw_cue_dtor(hot_buf[d][k]); hot_ok[d][k] = 0; }
+}
+/* Active Loop armed from hot cue `k` of deck d, which is gone: clear it (quietly if the row is off). */
+static void hot_gone_active(int d, int k)
+{
+    if (!act_ok[d] || !act_src_hot[d] || act_src_idx[d] != k) return;
+    if (deck_cid(d) != active_cid[d]) return;            /* another track is loaded: not this cue */
+    if (!holder_of(d)) { fw_cue_dtor(act_buf[d]); act_ok[d] = 0; active_cid[d] = 0; spent[d] = 0; }
+    else if (clear_active(d, "hot cue deleted") != 0) return;
+    LOG("deck %d: the armed loop (hot cue %d) was deleted -> Active Loop cleared", d + 1, k);
+    do_toast("Active Loop cleared (loop deleted)");
+}
+/* Compare each cached hot cue loop with its live slot. The slot read is a tick job. */
+static long hot_chk[NDECK];
+static void hot_refresh_deck(int d, int sweep)
+{
+    for (int k = 1; k <= 8; k++) {
+        if (!hot_ok[d][k]) {                              /* learn a loop we were not told about (row was off) */
+            void *l2 = live_hot(d, k);
+            if (l2 && fw_is_loop(l2)) hot_put(d, k, l2);
+            continue;
+        }
+        void *live = live_hot(d, k);
+        if (!live) continue;                              /* unreadable: unknown, leave it */
+        if (!fw_is_loop(live)) {
+            LOGC("deck %d: hot cue %d is not a loop any more (live slot), dropped from the loop list", d + 1, k);
+            if (sweep) persist_hot_deleted(d, k);          /* 0.2.9: DELETE+pad takes the flagged memory loop of that pad with it */
+            drop_hot(d, k);
+            if (sweep) hot_gone_active(d, k);
+        } else if (!near(cue_in(live), cue_in(hot_buf[d][k])) || !near(cue_out(live), cue_out(hot_buf[d][k]))) {
+            hot_put(d, k, live);
+        }
+    }
+}
+static void hot_refresh(int d)
+{
+    if (hot_chk[d] == tick_no) return;
+    hot_chk[d] = tick_no;
+    hot_refresh_deck(d, (unsigned long)tick_no <= (unsigned long)hot_dirty_until);
+}
+/* tick: while a delete is fresh, look at every deck's live slots each tick */
+static void hot_sweep(void)
+{
+    if ((unsigned long)tick_no > (unsigned long)hot_dirty_until) return;
+    for (int d = 0; d < NDECK; d++) { hot_chk[d] = tick_no; hot_refresh_deck(d, 1); }
+}
+
+static int raw_loop(int64_t in, int64_t out) { return out != INT64_MAX && out > in; }
+/* the memory loop of deck d nearest to [in,out] within DEL_TOL (-1 none) */
+static int mem_nearest(int d, int64_t in, int64_t out, int64_t *score)
+{
+    int bi = -1; int64_t bs = 0;
+    for (int i = 0; i < mem_n[d]; i++) {
+        if (!mem_ok[d][i] || !mem_live[d][i]) continue;
+        int64_t di = cue_in(mem_buf[d][i]) - in, dout = cue_out(mem_buf[d][i]) - out;
+        if (!near_del(cue_in(mem_buf[d][i]), in) || !near_del(cue_out(mem_buf[d][i]), out)) continue;
+        int64_t sc = (di < 0 ? -di : di) + (dout < 0 ? -dout : dout);
+        if (bi < 0 || sc < bs) { bi = i; bs = sc; }
+    }
+    if (score) *score = bs;
+    return bi;
+}
+static void mem_gone(int d, int i)
+{
+    LOG("deck %d: memory loop #%d deleted, dropped from the loop list", d + 1, i);
+    mem_live[d][i] = 0; mem_flag[d][i] = 0; mem_mine[d][i] = 0;   /* 0.2.9: a deleted flagged loop takes its flag with it */
+    if (act_ok[d] && !act_src_hot[d] && act_src_idx[d] == i && deck_cid(d) == active_cid[d]) {
+        if (!holder_of(d)) { fw_cue_dtor(act_buf[d]); act_ok[d] = 0; active_cid[d] = 0; spent[d] = 0; }
+        else if (clear_active(d, "memory cue deleted") != 0) return;
+        LOG("deck %d: the armed loop (memory #%d) was deleted -> Active Loop cleared", d + 1, i);
+        do_toast("Active Loop cleared (loop deleted)");
+    }
+}
+static void on_delete_ev(ev_t *e)
+{
+    if (!row_on()) return;                               /* row off: silent */
+    if (!e->draw || e->kind < 0 || e->kind > 8) return;
+    int loop = raw_loop(e->din, e->dout);
+    LOGC("deleteCue seen: kind %d loop=%d at in=%lld out=%lld", e->kind, loop, (long long)e->din,
+        (long long)(e->dout == INT64_MAX ? -1 : e->dout));
+    if (e->kind >= 1) {                                  /* hot cue: the live slots say which deck */
+        hot_dirty_until = tick_no + 8;
+        hot_sweep();
+        return;
+    }
+    if (!loop) return;                                   /* a memory point cue: nothing of ours */
+    int d = press_deck_for(e->t_ns);
+    if (d < 0) {                                         /* no press: the one deck that has this loop */
+        int hit = -1, n = 0;
+        for (int dd = 0; dd < NDECK; dd++)
+            if (mem_nearest(dd, e->din, e->dout, NULL) >= 0) { hit = dd; n++; }
+        if (n != 1) {
+            LOG("deleteCue kind 0: %s deck, nothing changed", n ? "ambiguous" : "unknown");
+            return;
+        }
+        d = hit;
+    }
+    int64_t sc = 0;
+    int i = mem_nearest(d, e->din, e->dout, &sc);
+    if (i < 0) return;
+    mem_gone(d, i);
+}
+
+/* SHIFT+pad (the filter ate the pad): a loop pad becomes the Active Loop; anything else is handed
+ * back to stock by replaying the SHIFT+pad (FS.req), so a point cue is deleted as it always was. */
+/* a hot-cue slot with no cue: its Position is not valid (the firmware's own is_loop / valid_loop test the same fields). A loop
+ * or a point cue has a valid Position. Tick-only, like every slot read. */
+static int slot_empty(const void *live)
+{
+    return !fw_is_loop((void *)live) && !pos_valid((const uint8_t *)live + 0x28);
+}
+/* the pad mode of deck d is KNOWN to be BEAT LOOP or SLIP LOOP: then the pads are not hot cue pads (the core reports HOT CUE, BEAT JUMP
+ * and sampler as unknown, -1), and what stock does with SHIFT+pad / DELETE+pad there is not ours to swallow. Tick only. */
+static int pads_not_hotcue(int d)
+{
+    az_deck_info di; memset(&di, 0, sizeof di); di.size = sizeof di;
+    if (!C || !AZ_HAS(C, deck_info) || C->deck_info(d, &di) != 0) return 0;
+    return di.pad_mode == 1 || di.pad_mode == 2;
+}
+/* tick: while DELETE is held on a side, publish which of that deck's pads are EMPTY, so the filter can swallow DELETE+empty pad
+ * (a rewrite to SHIFT+pad would make stock STORE a cue there). 0 = unknown (the old behaviour) for a side whose DELETE is up. */
+static void emp_refresh(void)
+{
+    uint32_t emp = 0;
+    for (int s = 0; s < 2; s++) {
+        if (!__atomic_load_n(&FS.dh[s], __ATOMIC_RELAXED)) continue;
+        int d = side_to_deck(s);
+        if (pads_not_hotcue(d)) continue;
+        for (int k = 1; k <= 8; k++) {
+            void *l = live_hot(d, k);
+            if (l && slot_empty(l)) emp |= 1u << (8 * s + k - 1);
+        }
+    }
+    if (emp != __atomic_load_n(&FS.emp, __ATOMIC_RELAXED)) __atomic_store_n(&FS.emp, emp, __ATOMIC_RELAXED);
+}
+/* 0.2.9: the pad colour. A pad is RED while its loop is the Active Loop: the armed one, else the flagged memory loop of the track
+ * (what was saved). The tick publishes one bit per pad and side; on_led (the core's LED-frame callback, the deck I/O path) paints
+ * those pads and nothing else: no lock, no call, no state of its own. Stock rewrites the whole frame every cycle, so when the bit
+ * goes away the pad has its own colour again at the very next frame. */
+static int red_extent(int d, int64_t *in, int64_t *out)
+{
+    if (act_ok[d] && !spent[d]) { *in = active_in[d]; *out = active_out[d]; return 1; }
+    int i = flagged_idx(d);
+    if (i >= 0) { *in = cue_in(mem_buf[d][i]); *out = cue_out(mem_buf[d][i]); return 1; }
+    return 0;
+}
+static uint32_t led_pub[2];                 /* atomic: bit k-1 = pad k of that side is red */
+static void led_refresh(void)
+{
+    for (int s = 0; s < 2; s++) {
+        int d = side_to_deck(s); uint32_t m = 0; int64_t in, out;
+        if (holder_of(d) && red_extent(d, &in, &out))
+            for (int k = 1; k <= 8; k++)
+                if (hot_ok[d][k] && fw_is_loop(hot_buf[d][k]) && ext_loose(hot_buf[d][k], in, out)) m |= 1u << (k - 1);
+        if (m != __atomic_load_n(&led_pub[s], __ATOMIC_RELAXED)) {
+            __atomic_store_n(&led_pub[s], m, __ATOMIC_RELAXED);
+            LOGC("deck %d (side %d): red pads mask %02x", d + 1, s + 1, m);
+        }
+    }
+}
+/* LED frame (128 bytes, CRC restamped by the core): side s at +s*0x38, pad k (0..7) = 4-byte cell {R,G,B,0} at 0x1e + 4k, pad-mode
+ * buttons at 0x0e + 4j (j 0 = HOT CUE). Linear light: red is FF0000. Only while HOT CUE is the lit mode button (full brightness,
+ * not the lime secondary page), only a pad that is lit already (dark stays dark), at the cell's own brightness (full, else the
+ * stock 12/255 envelope). */
+#define LED_PAD_OFF  0x1e
+#define LED_MODE_OFF 0x0e
+#define LED_SIDE     0x38
+static uint32_t led_sig[2];                 /* on_led's own (I/O thread only): what was last logged per side */
+static unsigned led_dbg_n;
+static int on_led(int bus, unsigned char *f, int len)
+{
+    if (bus != AZ_BUS_ERP_LED || !f || len < 0x78) return AZ_FRAME_OK;
+    for (int s = 0; s < 2; s++) {
+        uint32_t m = __atomic_load_n(&led_pub[s], __ATOMIC_RELAXED);
+        if (!m) { led_sig[s] = 0; continue; }
+        const unsigned char *mb = f + LED_MODE_OFF + s * LED_SIDE;
+        unsigned mx = mb[0] > mb[1] ? mb[0] : mb[1]; if (mb[2] > mx) mx = mb[2];
+        int lime = mb[1] >= mb[0] && mb[2] == 0 && mb[0] > 0 && mb[0] < mb[1];
+        int gate = !(mx < 0x40 || lime);                       /* HOT CUE is the live mode on this side */
+        int first = -1; unsigned char was[3] = { 0, 0, 0 };
+        if (gate) {
+            for (int k = 0; k < 8; k++) {
+                if (!((m >> k) & 1u)) continue;
+                unsigned char *c = f + LED_PAD_OFF + 4 * k + s * LED_SIDE;
+                unsigned cm = c[0] > c[1] ? c[0] : c[1]; if (c[2] > cm) cm = c[2];
+                if (!cm) continue;
+                if (first < 0) { first = k; was[0] = c[0]; was[1] = c[1]; was[2] = c[2]; }
+                c[0] = cm >= 0x40 ? 0xff : 12; c[1] = 0; c[2] = 0;
+            }
+        }
+        /* evidence for the emulator run (it has no LEDs): one queued line per change of what is painted (at most 24 per session) */
+        uint32_t sig = (m << 2) | (uint32_t)gate << 1 | (first >= 0);
+        if (sig != led_sig[s] && led_dbg_n < 24) {
+            led_sig[s] = sig; led_dbg_n++;
+            if (first >= 0) {
+                const unsigned char *c = f + LED_PAD_OFF + 4 * first + s * LED_SIDE;
+                LOG("led side %d: red pads %02x, HOT CUE cell %02x%02x%02x, pad %d cell (RGB) %02x%02x%02x -> %02x%02x%02x", s + 1, m,
+                    mb[0], mb[1], mb[2], first + 1, was[0], was[1], was[2], c[0], c[1], c[2]);
+            } else
+                LOG("led side %d: red pads %02x wanted, nothing painted: %s (HOT CUE cell %02x%02x%02x)", s + 1, m,
+                    gate ? "the pad cells are dark" : "HOT CUE is not the lit mode", mb[0], mb[1], mb[2]);
+        }
+    }
+    return AZ_FRAME_OK;
+}
+/* SHIFT+pad on the armed pad: the Active Loop is off (cleared); the normal hot cue loop stays. Our own saved copy is deleted; a
+ * flagged loop we do not own stays, flag included, and the toast says so. If our copy cannot be removed now the loop stays ARMED
+ * (never a flag left behind with the pad disarmed). */
+static void al_off(int d, int kind)
+{
+    const uint8_t *c = hot_buf[d][kind];
+    char t[32]; fmt_time(t, sizeof t, cue_in(c));
+    int pc = persist_clear(d, c);
+    if (pc == PC_FAIL) {
+        LOG("deck %d: SHIFT+pad on the armed pad (hot cue %d at %s): saved copy cannot be removed now, Active Loop stays on", d + 1, kind, t);
+        do_toast("Active Loop stays on: saved copy not removable now (press MEMORY once, try again)");
+        return;
+    }
+    if (act_ok[d] && clear_active(d, "SHIFT+pad toggle off") != 0) return;     /* busy: press again */
+    LOG("deck %d: SHIFT+pad on the armed pad (hot cue %d at %s): Active Loop off%s", d + 1, kind, t,
+        pc == PC_DONE ? ", saved flag removed" : pc == PC_KEPT ? ", the saved flag of another loop stays" : " (nothing saved for it)");
+    if (pc == PC_KEPT) toastf("Active Loop off at %s (its saved flag stays in the track)", t);
+    else toastf("Active Loop off: hot cue at %s", t);
+}
+static void apply_pad(int s, int d, int kind)
+{
+    if (kind < 1 || kind > 8) { LOG("pad abort: bad kind %d", kind); return; }
+    void *live = live_hot(d, kind);
+    if (live && fw_is_loop(live)) hot_put(d, kind, live);
+    else if (live && hot_ok[d][kind]) { fw_cue_dtor(hot_buf[d][kind]); hot_ok[d][kind] = 0; }
+    if (hot_ok[d][kind] && fw_is_loop(hot_buf[d][kind])) {
+        if (!holder_of(d)) { LOG("pad abort: deck %d not bound", d + 1); do_toast("Active Loop: deck not ready"); return; }
+        if (act_ok[d] && !spent[d] && ext_loose(hot_buf[d][kind], active_in[d], active_out[d])) { al_off(d, kind); return; }   /* the pad's loop is armed: second press */
+        pick_quiet = 1;
+        int pr = pick_and_set(d, hot_buf[d][kind], 1, kind, "SHIFT+pad hot cue");
+        pick_quiet = 0;
+        if (pr != 0) return;
+        char t[32]; fmt_time(t, sizeof t, cue_in(hot_buf[d][kind]));
+        int ps = persist_set(d, hot_buf[d][kind]);
+        toastf(ps == PS_OK ? "Active Loop saved: hot cue at %s" :
+               ps == PS_HAVE ? "Active Loop armed at %s (already saved)" :
+               ps == PS_NOSTORE ? "Active Loop armed at %s (not saved yet)" :
+               ps == PS_FULL ? "Active Loop armed at %s, NOT saved: memory list full" :
+               ps == PS_TWIN ? "Active Loop armed at %s, NOT saved: same loop already in memory" :
+               ps == PS_FOREIGN ? "Active Loop armed at %s, NOT saved: another loop is saved as Active" :
+               ps == PS_NOCHK ? "Active Loop armed at %s, NOT saved yet (reading the track)" :
+               "Active Loop armed at %s (not saved now)", t);
+        return;
+    }
+    if (!live) { LOG("pad: deck %d hot cue %d unreadable, left alone", d + 1, kind); do_toast("Active Loop: deck not ready"); return; }
+    if (slot_empty(live) && !pads_not_hotcue(d)) {
+        /* 0.2.8 al028d: stock stores a hot cue when SHIFT+pad is replayed on an EMPTY pad. SHIFT+empty pad must do nothing. */
+        const uint8_t *P = (const uint8_t *)live + 0x28;
+        LOG("pad: deck %d hot cue %d is EMPTY (position invalid: key %02x%02x%02x%02x, sample %lld): SHIFT+pad swallowed, nothing stored", d + 1, kind,
+            P[8], P[12], P[14], P[16], (long long)*(const int64_t *)(P + 24));
+        return;
+    }
+    {   /* al028f: the same raw Position words as the EMPTY line, so the two can be compared */
+        const uint8_t *P = (const uint8_t *)live + 0x28;
+        LOG("pad: deck %d hot cue %d is a point cue (position valid: key %02x%02x%02x%02x, sample %lld, in=%lld), SHIFT+pad passed to stock so it is deleted", d + 1, kind,
+            P[8], P[12], P[14], P[16], (long long)*(const int64_t *)(P + 24), (long long)cue_in(live));
+    }
+    __atomic_store_n(&FS.req, RQ_VALID | ((uint32_t)(s & 1) << 9) | (1u << (kind - 1)), __ATOMIC_RELAXED);
 }
 
 static void *live_hot(int d, int kind)
@@ -1647,21 +2771,6 @@ static void *live_hot(int d, int kind)
     if (!plausible((uintptr_t)ls) || !fw_loop_slot || safe_read((uintptr_t)ls, &probe, 8)) return NULL;
     void *c = fw_loop_slot(ls, kind);
     return plausible((uintptr_t)c) ? c : NULL;
-}
-
-/* SHIFT+pad: that hot cue loop becomes the Active Loop directly (its own CueProperty). */
-static void apply_copy_pad(int d, int kind)
-{
-    if (!holder_of(d)) { LOG("pad abort: deck %d not bound", d + 1); do_toast("Active Loop: deck not ready"); return; }
-    if (kind < 1 || kind > 8) { LOG("pad abort: bad kind %d", kind); return; }
-    if (!(hot_ok[d][kind] && fw_is_loop(hot_buf[d][kind]))) {
-        void *live = live_hot(d, kind);
-        if (live && fw_is_loop(live)) hot_put(d, kind, live);
-    }
-    if (!(hot_ok[d][kind] && fw_is_loop(hot_buf[d][kind]))) {
-        LOG("pad abort: hot cue %d is not a loop", kind); do_toast("Active Loop: pad is not a loop"); return;
-    }
-    pick_and_set(d, hot_buf[d][kind], 1, kind, "SHIFT+pad hot cue");
 }
 
 /* tick: re-arm log; 0.2.1 exit detection from the playhead itself.
@@ -1701,7 +2810,7 @@ static void watch_loops(void)
         if (pos >= in && pos <= out + EXIT_TOL) {
             if (!ex_inside[d]) {
                 fmt_time(ti, sizeof ti, in); fmt_time(to, sizeof to, out);
-                LOG("deck %d: playhead inside the Active Loop %s-%s", d + 1, ti, to);
+                LOGC("deck %d: playhead inside the Active Loop %s-%s", d + 1, ti, to);
             }
             ex_inside[d] = 1; ex_past[d] = 0;
         } else if (pos > out + EXIT_TOL) {
@@ -1760,7 +2869,6 @@ static void sync_cfg(void)
  * info and refcounts are the firmware's own), with only the in/out sample positions changed.
  * Units: calibrated per track from a hot cue loop that is in both lists (cue units / ms),
  * else from the playhead hook vs deck_info seconds, else 44.1 per ms. */
-static uint32_t anlz_for[NDECK];     /* content id requested for this load (0 = not yet) */
 static int      anlz_merged[NDECK], anlz_wait[NDECK], anlz_parsed_logged[NDECK];
 static uint8_t  syn_tmp[CUE_SIZE] __attribute__((aligned(64)));
 static double units_shared;          /* 0.2.3: last calibrated units/ms, any deck */
@@ -1931,11 +3039,57 @@ static void auto_arm(int d, uint32_t cid)
     pick_and_set(d, c, hot, idx, src[0] == 'r' ? "auto-arm at load (rekordbox flag)" : "auto-arm at load (fallback)");
     toastf(src[0] == 'r' ? "Active Loop: %s (rekordbox)" : "Active Loop: first loop at %s (auto)", t);
 }
+/* ---- read-back (read-only): the ANLZ of the track, re-read some seconds after the last job, is logged against what was stored ---- */
+static void pv_report(int d, const anlz_res_t *r)
+{
+    int mem = 0, fl = 0, hit = 0;
+    for (int i = 0; i < r->n; i++) {
+        const al_t *e = &r->e[i];
+        if (e->hot) continue;
+        mem++;
+        if (e->flag) {
+            fl++;
+            double want_in = (double)pv_in[d] / 44.1;
+            if (e->in_ms > want_in - 60.0 && e->in_ms < want_in + 60.0) hit++;
+            char ti[32], to[32]; fmt_time(ti, sizeof ti, (int64_t)(e->in_ms * 44.1)); fmt_time(to, sizeof to, (int64_t)(e->out_ms * 44.1));
+            LOG("  persist check deck %d: ANLZ flagged memory loop %s-%s (in %.0f ms, out %.0f ms)", d + 1, ti, to, (double)e->in_ms, (double)e->out_ms);
+        }
+    }
+    char t[32]; fmt_time(t, sizeof t, pv_in[d]);
+    int ok = pv_want[d] ? hit > 0 : hit == 0;
+    LOG("deck %d: persist check: ANLZ has %d memory loops (%d cues in all), %d flagged; expected %s at %s: %s (cache: %d memory loops)", d + 1, mem, r->memcues, fl,
+        pv_want[d] ? "a flagged loop" : "no flag", t, ok ? "OK" : "MISMATCH (the firmware has not written it, or wrote it differently)", live_loops(d));
+    /* 0.2.10 ownership: our copy becomes deletable only when the file shows exactly what a stored copy leaves: one flagged loop, there,
+     * and the loop count we expected. Anything else: the mod never deletes it. */
+    int i = pv_idx[d]; pv_idx[d] = -1;
+    if (pv_want[d] && i >= 0 && i < NMEM && mem_ok[d][i] && mem_mine[d][i] == OWN_PEND && ext_loose(mem_buf[d][i], pv_in[d], pv_out[d])) {
+        if (hit == 1 && fl == 1 && mem == pv_pre[d]) {
+            mem_mine[d][i] = OWN_OK;
+            LOG("deck %d: our saved copy at %s is confirmed in the stored data (one flagged loop, %d memory loops as expected): it may be deleted again by this mod", d + 1, t, mem);
+        } else if (hit == 0) {
+            LOG("deck %d: the firmware did not store the flagged copy at %s: forgotten, nothing will be deleted", d + 1, t);
+            mem_drop(d, i);
+            do_toast("Active Loop: NOT saved (the firmware did not store it)");
+        } else {
+            mem_mine[d][i] = OWN_NONE;
+            LOG("deck %d: not sure the flagged loop at %s is our copy (%d flagged, %d memory loops, expected %d): the mod will not delete it", d + 1, t, fl, mem, pv_pre[d]);
+        }
+    }
+}
+static void pv_service(void)
+{
+    for (int d = 0; d < NDECK; d++) {
+        if (!pv_due[d] || tick_no < pv_due[d] || pj_cnt) continue;
+        pv_due[d] = 0;
+        if (!deck_cid(d)) continue;
+        pv_active[d] = 1; anlz_for[d] = 0;               /* anlz_service re-reads it and calls pv_report, without merging */
+    }
+}
 static void anlz_service(void)
 {
     if (tick_no % 15) return;
     for (int d = 0; d < NDECK; d++) {
-        uint32_t cid = deck_cid(d);
+        uint32_t cid = load_id(d);                      /* al028g: never the previous track's id while the load is landing */
         if (!cid || !holder_of(d)) continue;
         if (anlz_for[d] != cid) {                       /* new load (or first sight): ask the worker */
             anlz_for[d] = cid; anlz_merged[d] = 0; anlz_wait[d] = 0; anlz_parsed_logged[d] = 0;
@@ -1944,8 +3098,13 @@ static void anlz_service(void)
         }
         if (anlz_merged[d]) continue;
         uint32_t st = __atomic_load_n(&anlz_state[d], __ATOMIC_ACQUIRE);
-        if (st == 3) { anlz_merged[d] = 1; LOG("deck %d: stored loops not read: %s (loops known once called/stored)", d + 1, anlz_res[d].msg); auto_arm(d, cid); continue; }
+        if (st == 3) {
+            anlz_merged[d] = 1;
+            if (pv_active[d]) { pv_active[d] = 0; LOG("deck %d: persist check: ANLZ not readable: %s", d + 1, anlz_res[d].msg); continue; }
+            LOG("deck %d: stored loops not read: %s (loops known once called/stored)", d + 1, anlz_res[d].msg); auto_arm(d, cid); continue;
+        }
         if (st != 2 || anlz_res[d].cid != cid) continue;
+        if (pv_active[d]) { pv_active[d] = 0; anlz_merged[d] = 1; pv_report(d, &anlz_res[d]); continue; }   /* 0.2.9: read-back only, no merge */
         if (!anlz_parsed_logged[d]) {
             int f = 0, m = 0; for (int i = 0; i < anlz_res[d].n; i++) { f += anlz_res[d].e[i].flag != 0; m += !anlz_res[d].e[i].hot; }
             anlz_parsed_logged[d] = 1;
@@ -1979,33 +3138,42 @@ static void anlz_service(void)
     anlz_kick();
 }
 
-/* 0.2.1: own timing every 10 s (filter, hooks), in us */
+/* 0.2.1: own timing (filter, hooks), in us. 0.2.8: every 30 s (the 10 s lines were more than half of the
+ * log, and the core moves a log over 128 KB to .log.1 at the next start), and the filter figures cover
+ * EVERY call: calls over 100 us / over 200 us (the core's budget; each one can be a strike), the longest
+ * call, and the gaps between calls (frame period + any stall of the bus thread). */
 static void timing_log(void)
 {
-    static uint64_t last; static uint32_t fq; static uint32_t smax_f, smax_e, smax_ea, smax_c;
+    static uint64_t last; static uint32_t fq; static uint32_t smax_f, smax_e, smax_ea, smax_c, smax_g;
+    static unsigned tot_o2, tot_go;
     uint64_t now = now_ns();
-    if (!fq) {
-        uint64_t f = cnt_frq(); fq = f ? (uint32_t)f : 1000000000u;
-        __atomic_store_n(&FS.thr, (uint32_t)(fq / 10000u), __ATOMIC_RELAXED);   /* 100 us */
-    }
+    if (!fq) { uint64_t f = cnt_frq(); fq = f ? (uint32_t)f : 1000000000u; }
     if (!last) { last = now; return; }
-    if (now - last < 10000000000ull) return;
+    if (now - last < 30000000000ull) return;
     last = now;
     uint32_t f = take0(&FS.fmax);
     uint32_t fo = take0(&FS.fover);
+    uint32_t fo2 = take0(&FS.fover2);
+    uint32_t g = take0(&FS.gmax);
+    uint32_t go = take0(&FS.gover);
+    uint32_t ne = take0(&FS.nedge);
+    static uint64_t st_last; uint64_t st_now = __atomic_load_n(&FS.stamp, __ATOMIC_RELAXED);
+    double nfr = (double)((((st_now >> 40) - (st_last >> 40)) & 0xffffffull) * 256u); st_last = st_now;
     uint32_t e = take0(&hmax_ec_own);
     uint32_t ea = take0(&hmax_ec_all);
     uint32_t c = take0(&hmax_cue);
     uint32_t er = take0(&hmax_ec_rare);
     if (f > smax_f) smax_f = f;
+    if (g > smax_g) smax_g = g;
     if (e > smax_e) smax_e = e;
     if (ea > smax_ea) smax_ea = ea;
     if (c > smax_c) smax_c = c;
+    tot_o2 += fo2; tot_go += go;
 #define US(x) ((double)(x) * 1e6 / (double)fq)
-    LOG("timing 10s (us, own code, cntvct): filter max %.1f (session %.1f), %u calls >100; "
-        "engage-check hot path max %.1f (session %.1f), with firmware %.1f (session %.1f), rare path max %.1f; "
-        "cue hooks max %.1f (session %.1f) [filter and hot path sampled 1/64]",
-        US(f), US(smax_f), fo, US(e), US(smax_e), US(ea), US(smax_ea), US(er), US(c), US(smax_c));
+    LOG("timing 30s (us, own code, cntvct): filter, every call: max %.1f (session %.1f), >100us %u, >200us %u (session %u); "
+        "frame gap max %.0f (session %.0f), typical interval %.0f, stalls (gap > 3x typical) %u (session %u); frames %.0f, edge frames %u; "
+        "engage hot path max %.1f (session %.1f) w/fw %.1f rare %.1f; cue hooks max %.1f (session %.1f)",
+        US(f), US(smax_f), fo, fo2, tot_o2, US(g), US(smax_g), US(__atomic_load_n(&FS.fi, __ATOMIC_RELAXED)), go, tot_go, nfr, ne, US(e), US(smax_e), US(ea), US(er), US(c), US(smax_c));
 #undef US
 }
 
@@ -2023,7 +3191,10 @@ static void row_changed(int value, void *user)
 {
     sync_cfg();
     __atomic_store_n(&FS.cfg, __atomic_load_n(&cfg_bits, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
-    LOG("row %s -> %s (applied now)", (const char *)user, value == 1 ? "ON" : "OFF");
+    /* 0.2.8: the main row says it once, from the tick that acts on it (row_went_off / row_went_on);
+     * the two sub-rows log here as before, but not while the main row is off */
+    if (strcmp((const char *)user, "Active Loop") != 0 && row_on())      /* with the main row off: silent */
+        LOG("row %s -> %s (applied now)", (const char *)user, value == 1 ? "ON" : "OFF");
 }
 static unsigned long n_reload, n_eject;   /* 0.2.6: load/eject counts, no per-event log */
 static int restore_wait[NDECK];
@@ -2034,6 +3205,7 @@ static void track_changed(int d, const char *why)
     mem_reset(d);
     (void)why;   /* 0.2.6: no per-load log line (log-quiet gate); counted instead */
     __atomic_add_fetch(&n_reload, 1, __ATOMIC_RELAXED);
+    stash_active(d);                       /* al028f: FIRST: nothing of the old load stays armed (see stash_active) */
     ready_drop_others(d);
     autoarm_done[d] = 0;
     __atomic_store_n(&src_ok[d], 0u, __ATOMIC_RELEASE);
@@ -2042,17 +3214,86 @@ static void track_changed(int d, const char *why)
     if (__atomic_load_n(&snap_state[d], __ATOMIC_ACQUIRE) == 2) { fw_cue_dtor(snap_buf[d]); }
     __atomic_store_n(&snap_state[d], 0u, __ATOMIC_RELEASE);
     anlz_for[d] = 0;                       /* re-read the stored loops for this load */
+    pv_active[d] = 0; pv_due[d] = 0; pv_idx[d] = -1;       /* 0.2.9: a read-back of the old load must never eat this load's ANLZ merge */
     spent[d] = 0; ex_inside[d] = 0; ex_past[d] = 0;
-    restore_pending[d] = act_ok[d] && active_cid[d] != 0;
+    dg_near[d] = 0; dg_stall[d] = 0; dg_pos[d] = -1; dg_ns[d] = 0;
+    last_call_ok[d] = 0; act_src_hot[d] = 0; act_src_idx[d] = 0; hot_chk[d] = 0;
+    restore_pending[d] = rem_ok[d] && rem_cid[d] != 0;      /* only a remembered loop of the previous load can come back */
     restore_wait[d] = 0;
+}
+/* 0.2.8 al028f: the three paths that see a load (the core's deck event, the load cues of the hooks, the content-id poll)
+ * report ONE load, so only the first of them within the load's window runs track_changed (and logs it). A repeat is
+ * recognised by its content id (same id, or the first call came before the id was known) inside a window of 2 s (5 s while
+ * the id is still unknown). A different id, or a call after the window, is a new load. Ejects and a row switch reset it. */
+#define LOAD_DUP_TICKS      120
+#define LOAD_DUP_TICKS_UNK  300
+static int load_changed(int d, const char *why)
+{
+    uint32_t cid = load_id(d);
+    if (tc_seen[d]) {
+        long win = tc_cid[d] ? LOAD_DUP_TICKS : LOAD_DUP_TICKS_UNK;
+        if (tick_no - tc_tick[d] < win && (!cid || !tc_cid[d] || cid == tc_cid[d])) {
+            if (cid && !tc_cid[d]) { tc_cid[d] = cid; tc_tick[d] = tick_no; }
+            return 0;                       /* the same load, already handled */
+        }
+    }
+    tc_seen[d] = 1; tc_tick[d] = tick_no; tc_cid[d] = cid;
+    track_changed(d, why);
+    return 1;
+}
+/* tick: the content id of a load handled before it was known; and the "track loaded" lines that waited for it */
+static void load_service(void);
+static void load_cue_seen(int d)
+{
+    int first = !last_load_tick[d] || tick_no - last_load_tick[d] > 60;
+    last_load_tick[d] = tick_no;                        /* before load_changed: load_id() must see this load cue */
+    if (first && load_changed(d, "load events")) log_load(d, "seen from the load cues");
 }
 static void poll_cids(void)
 {
     if (++cid_poll % 30) return;
     for (int d = 0; d < NDECK; d++) {
         uint32_t c = deck_cid(d);
-        if (c && seen_cid[d] && c != seen_cid[d]) track_changed(d, "content id changed");
+        if (c && seen_cid[d] && c != seen_cid[d]) { if (load_changed(d, "content id changed")) log_load(d, "content id changed"); }
         if (c) seen_cid[d] = c;
+    }
+}
+/* One "track loaded" line per deck per 2 s (the SDK's log-quiet gate; a load every 2 s is not a human), whichever path saw the
+ * load first. 0.2.8 al028d: the core's deck event does NOT fire for a deck's first known state after the core started (that is
+ * its baseline) nor for the same track loaded again (no content id change), so a load was sometimes not logged although the mod
+ * handled it (the hook path and the content-id poll call track_changed too). Every path logs through here now.
+ * al028f: the load cues run BEFORE the deck reports the track, so the first line used to say "content id 0". The line now waits
+ * (load_service) until the content id is known; after 3 s without one it is logged as "not known yet". */
+static uint64_t ld_ns[NDECK]; static unsigned ld_skip[NDECK];
+static void log_load_now(int d, const char *via)
+{
+    uint64_t tn = now_ns();
+    if (ld_ns[d] && tn - ld_ns[d] < 2000000000ull) { ld_skip[d]++; return; }
+    ld_ns[d] = tn;
+    uint32_t cid = load_id(d);
+    if (cid) LOG("deck %d: track loaded (content id %u; %s)%s", d + 1, cid, via, ld_skip[d] ? " [earlier loads within 2 s not logged]" : "");
+    else     LOG("deck %d: track loaded (content id not known yet; %s)%s", d + 1, via, ld_skip[d] ? " [earlier loads within 2 s not logged]" : "");
+    ld_skip[d] = 0;
+}
+static void log_load(int d, const char *via)
+{
+    if (!load_id(d)) {                                  /* wait for the id */
+        if (!ld_pend[d]) { ld_pend[d] = via; ld_pend_tick[d] = tick_no; }
+        return;
+    }
+    ld_pend[d] = NULL;
+    log_load_now(d, via);
+}
+static void load_service(void)
+{
+    for (int d = 0; d < NDECK; d++) {
+        if (!tc_seen[d] && !ld_pend[d]) continue;
+        uint32_t cid = load_id(d);
+        if (tc_seen[d] && !tc_cid[d] && cid) { tc_cid[d] = cid; tc_tick[d] = tick_no; }   /* the id of a load handled before it was known */
+        if (ld_pend[d] && (cid || tick_no - ld_pend_tick[d] > 180)) {
+            const char *via = ld_pend[d]; ld_pend[d] = NULL;
+            log_load_now(d, via);
+        }
     }
 }
 static void deck_events(void)
@@ -2061,8 +3302,13 @@ static void deck_events(void)
     for (int d = 0; d < NDECK; d++) {
         int loaded = (ev >> d) & 1, ejected = (ev >> (d + 4)) & 1;
         if (!loaded && !ejected) continue;
-        if (loaded) track_changed(d, "deck event");
-        else { mem_reset(d); restore_pending[d] = 0; __atomic_add_fetch(&n_eject, 1, __ATOMIC_RELAXED); }
+        if (loaded) {
+            if (load_changed(d, "deck event")) log_load(d, "core deck event");
+        } else {
+            mem_reset(d); restore_pending[d] = 0; __atomic_add_fetch(&n_eject, 1, __ATOMIC_RELAXED);   /* ejects are counted, not logged */
+            stash_active(d);                      /* al028f: an armed loop never stays armed on an empty deck; a reload of the same track may restore it */
+            tc_seen[d] = 0; ld_pend[d] = NULL; anlz_for[d] = 0; pv_active[d] = 0; pv_due[d] = 0; pv_idx[d] = -1;
+        }
     }
 }
 /* (5) same track reloaded this session: re-apply the remembered active loop as soon as
@@ -2074,44 +3320,57 @@ static void try_restore(void)
     for (int d = 0; d < NDECK; d++) {
         if (!restore_pending[d] || !holder_of(d)) continue;
         if (tick_no - last_load_tick[d] < 60) continue;
-        if (!act_ok[d]) { restore_pending[d] = 0; continue; }
+        if (!rem_ok[d]) { restore_pending[d] = 0; continue; }
         uint32_t cid = deck_cid(d);
-        if (!cid) { if (++restore_wait[d] > 60 * 30) { restore_pending[d] = 0; LOG("restore deck %d: gave up (no content id)", d + 1); } continue; }
-        if (cid != active_cid[d]) { restore_pending[d] = 0; LOG("restore deck %d: other track (%u, was %u), nothing to restore", d + 1, cid, active_cid[d]); continue; }
-        int i = mem_find_live(d, act_buf[d]);
+        if (!cid) { if (++restore_wait[d] > 60 * 30) { restore_pending[d] = 0; drop_rem(d); LOG("restore deck %d: gave up (no content id)", d + 1); } continue; }
+        if (cid != rem_cid[d]) {                          /* another track: its loop is not this one's, it is forgotten */
+            restore_pending[d] = 0;
+            LOG("restore deck %d: other track (%u, was %u), nothing to restore", d + 1, cid, rem_cid[d]);
+            drop_rem(d);
+            continue;
+        }
+        int i = mem_find_live(d, rem_buf[d]);
         if (i < 0) {
             if (++restore_wait[d] == 1)
                 LOG("restore deck %d: waiting until memory loop in=%lld out=%lld is seen live (CALL it)", d + 1,
-                    (long long)active_in[d], (long long)active_out[d]);
+                    (long long)rem_in[d], (long long)rem_out[d]);
             continue;
         }
         restore_pending[d] = 0;
         set_active_mem(d, i, "restore");
         LOG("restore deck %d: same track %u, live memory loop in=%lld out=%lld re-applied", d + 1, cid,
-            (long long)active_in[d], (long long)active_out[d]);
+            (long long)rem_in[d], (long long)rem_out[d]);
+        drop_rem(d);
     }
 }
-/* Stock DELETE (no SHIFT) removes the memory cue at the playhead = the last called/stored one. */
-/* Stock DELETE: EP147 gives us no delete event, and the deleted cue is not always the
- * last called one. So: the suspect cue stops counting as live (no dup match, no restore)
- * but nothing is cleared or forgotten; seeing it again in a call/store cancels it. */
-static void on_stock_delete(int d)
+/* al028f: the invariant behind all of the above, checked every tick: an armed Active Loop belongs to the content id that was
+ * loaded when it was armed. If the deck now reports another id (a load none of the paths reported), it is dropped and the
+ * firmware's copy cleared, so it can never engage on the new track. Also issues the firmware clear that a track change owes. */
+static void loop_guard(void)
 {
-    if (!last_call_ok[d]) {
-        for (int i = 0; i < mem_n[d]; i++) mem_live[d][i] = 0;
-        LOG("stock DELETE deck %d: target unknown, memory cache unverified until seen again", d + 1);
-        return;
+    for (int d = 0; d < NDECK; d++) {
+        if (act_ok[d]) {
+            uint32_t cid = deck_cid(d);
+            if (cid && active_cid[d] && cid != active_cid[d]) {
+                LOG("deck %d: the armed Active Loop belongs to content id %u, but content id %u is loaded: dropped", d + 1, active_cid[d], cid);
+                stash_active(d); drop_rem(d); restore_pending[d] = 0;
+            }
+        }
+        if (clear_owed[d]) {                              /* what a track change owes the firmware */
+            if (!holder_of(d)) clear_owed[d] = 0;
+            else if (request(d, OP_CLEAR, NULL, "track change") == 0) clear_owed[d] = 0;      /* busy: next tick */
+        }
     }
-    int64_t in = last_call_in[d], out = last_call_out[d];
-    for (int i = 0; i < mem_n[d]; i++)
-        if (mem_ok[d][i] && near(cue_in(mem_buf[d][i]), in) && near(cue_out(mem_buf[d][i]), out)) mem_live[d][i] = 0;
-    del_pend_in[d] = in; del_pend_out[d] = out; del_pend_ok[d] = 1;
-    LOG("stock DELETE deck %d: pending (unconfirmed) for memory cue in=%lld out=%lld; not used for "
-        "dup/restore until seen again; Active Loop left as is", d + 1, (long long)in, (long long)out);
 }
-
 static unsigned nib(uint64_t v, unsigned pos) { return (unsigned)((v >> pos) & 0xfu); }
 
+/* replay length in frames for a typical frame interval fi (ticks of hz): 40 ms, at least 6, at most 200 (0.2.8 al028d) */
+static uint32_t rate_frames(uint64_t fi, uint64_t hz)
+{
+    if (!fi || !hz) return 12;
+    uint64_t n = (hz / 25u + fi / 2u) / fi;
+    return (uint32_t)(n < 6 ? 6 : n > 200 ? 200 : n);
+}
 static void poll_filter(void)
 {
     uint64_t sn = __atomic_load_n(&FS.snap, __ATOMIC_RELAXED);
@@ -2123,8 +3382,9 @@ static void poll_filter(void)
             /* 0.2.7: the core keeps a switched-off filter off for the session and a filter can
              * only be registered from init(), so it cannot be re-armed. Only the SHIFT combos
              * depend on it: auto-arm, engage, re-arm and Auto-advance run on hooks. */
-            LOG("frame filter is not running (no ERP frames for ~3 s): SHIFT+MEMORY / SHIFT+pad / "
-                "SHIFT+DELETE off until EP147 restarts; auto-arm, engage and Auto-advance still on");
+            LOG("frame filter is not running (no ERP frames for ~3 s): SHIFT+MEMORY / SHIFT+DELETE off "
+                "until EP147 restarts; SHIFT+pad / DELETE+pad are stock again (SHIFT+pad deletes a hot cue, a loop too); "
+                "auto-arm, engage and Auto-advance still on");
             do_toast("Active Loop on; SHIFT combos off until restart");
         }
     } else {
@@ -2132,6 +3392,57 @@ static void poll_filter(void)
         tk_hb_same = 0; tk_hb_seen = 1;
     }
     uint64_t now = now_ns();
+    {   /* 0.2.8 al028d: the frame rate comes from the filter's own running estimate of the typical frame interval (fi), so
+         * it is known after FI_MIN+ frames (about 1 s on the emulator's 17 frames/s, 16 ms on the deck), not after 2048.
+         * The replay length is 40 ms in frames (min 6); the stall threshold is the filter's own (3x fi). */
+        static int fr_logged; static double fr_last;
+        uint32_t fi = __atomic_load_n(&FS.fi, __ATOMIC_RELAXED);
+        if (fi && FS.fn >= 2 * FI_MIN) {
+            uint32_t n = rate_frames(fi, cnt_hz);
+            double fps = (double)cnt_hz / (double)fi;
+            if (n != FS.rp_frames) __atomic_store_n(&FS.rp_frames, n, __ATOMIC_RELAXED);
+            if ((cfg & CFG_ENABLE) && (!fr_logged || fps < fr_last * 0.9 || fps > fr_last * 1.1)) {
+                double lim = 3.0 * fi; if (lim < (double)FS.gthr) lim = (double)FS.gthr;
+                LOG("ERP frame rate %.0f/s (typical interval %.1f ms): SHIFT+pad / DELETE replay = %u frames (40 ms), a stall = a gap over %.1f ms (3x the interval)",
+                    fps, 1e3 / fps, n, lim * 1e3 / (double)cnt_hz);
+                fr_logged = 1; fr_last = fps;
+            }
+        }
+    }
+    {   /* DELETE+pad rewritten as SHIFT+pad (the filter saw both): proof for the log that the press reached the filter */
+        static uint32_t dlp_seen, tapx_seen;
+        uint32_t dp = __atomic_load_n(&FS.dlp, __ATOMIC_RELAXED), tx = __atomic_load_n(&FS.tapx, __ATOMIC_RELAXED);
+        if ((dp >> 16) != (dlp_seen >> 16)) {
+            unsigned n = ((dp >> 16) - (dlp_seen >> 16)) & 0xffffu;
+            dlp_seen = dp;
+            if (cfg & CFG_ENABLE) LOG("filter: DELETE+pad %u seen (last: side %u pad %u), sent to stock as SHIFT+pad", n, (dp >> 8) & 1u, dp & 0xffu);
+        }
+        static uint32_t dle_seen;
+        uint32_t de = __atomic_load_n(&FS.dle, __ATOMIC_RELAXED);
+        if ((de >> 16) != (dle_seen >> 16)) {
+            unsigned n = ((de >> 16) - (dle_seen >> 16)) & 0xffffu;
+            dle_seen = de;
+            if (cfg & CFG_ENABLE) LOG("filter: DELETE+pad %u on an EMPTY pad swallowed (last: side %u pad %u): nothing deleted, nothing stored", n, (de >> 8) & 1u, de & 0xffu);
+        }
+        if (tx != tapx_seen) {
+            unsigned n = tx - tapx_seen; tapx_seen = tx;
+            if (cfg & CFG_ENABLE) LOG("filter: %u DELETE hold(s) released with no pad seen, but a frame gap over 3x the typical interval came with it (the bus thread was stalled): "
+                                      "NOT replayed, so stock deletes nothing", n);
+        }
+    }
+    {   /* a DELETE with no pad was replayed to stock as a plain DELETE (a tap): say how long it was held */
+        static uint32_t tap_seen;
+        uint32_t tp = __atomic_load_n(&FS.tap, __ATOMIC_RELAXED);
+        if ((tp >> 16) != (tap_seen >> 16)) {
+            tap_seen = tp;
+            if (cfg & CFG_ENABLE) {
+                unsigned fh = tp & 0xffu;
+                uint64_t fiv = __atomic_load_n(&FS.fi, __ATOMIC_RELAXED);
+                LOG("DELETE released with no pad (side %u, held %u frames = ~%u ms): replayed as a plain DELETE, stock deletes the called/load memory cue",
+                    (tp >> 8) & 1u, fh, (unsigned)(fh * fiv * 1000u / (cnt_hz ? cnt_hz : 1u)));
+            }
+        }
+    }
     for (int s = 0; s < 2; s++) {
         unsigned base = 28u * (unsigned)s;
         unsigned dn[NSIG];
@@ -2142,38 +3453,106 @@ static void poll_filter(void)
         if (!(cfg & CFG_ENABLE)) continue;
         if (dn[SG_SET]) apply_set(side_to_deck(s));
         if (dn[SG_CLR]) apply_clear(side_to_deck(s));
-        if (dn[SG_PAD]) apply_copy_pad(side_to_deck(s), (int)nib(sn, base + 24));
+        if (dn[SG_PAD]) apply_pad(s, side_to_deck(s), (int)nib(sn, base + 24));
     }
     tk_snap = sn;
-    static uint32_t tk_del;
-    static int tk_del_seeded;
-    uint32_t dl = __atomic_load_n(&FS.del, __ATOMIC_RELAXED);
-    if (!tk_del_seeded) { tk_del_seeded = 1; tk_del = dl; }   /* never count a baseline as a press */
-    for (int s2 = 0; s2 < 2; s2++)
-        if (((dl >> (8 * s2)) & 0xffu) != ((tk_del >> (8 * s2)) & 0xffu)) on_stock_delete(side_to_deck(s2));
-    tk_del = dl;
 }
 
+/* Row off: "fully silent and inert". The hooks pass through (no events), the filter passes the frame
+ * through, the tick below only keeps the deck/press bookkeeping and the config. Nothing is logged,
+ * toasted, set, cleared or advanced. At the moment the row goes off the loops this mod armed are
+ * cleared (quietly, once) so no armed loop is left behind to trap the playhead with nobody
+ * watching it; going on again re-learns everything from the live slots and re-reads the ANLZ
+ * files, without arming anything by itself. */
+static int tk_row_was = 1;
+static void drop_ring(void)
+{
+    ring_off = (int64_t)now_ns() - (int64_t)cnt_to_ns(cnt_now());
+    uint32_t w = __atomic_load_n(&ring_w, __ATOMIC_ACQUIRE);
+    for (int k = 0; k < RING; k++) {
+        ev_t *e = &ring[k];
+        uint32_t sq = __atomic_load_n(&e->seq, __ATOMIC_ACQUIRE);
+        if (sq && sq != SEQ_BUSY) {
+            if (e->has_cue) fw_cue_dtor(e->cue);
+            __atomic_store_n(&e->seq, 0, __ATOMIC_RELEASE);
+        }
+    }
+    ring_r = w; ring_stall = 0;
+}
+static void row_went_off(void)
+{
+    int n = 0;
+    for (int d = 0; d < NDECK; d++) {
+        drop_rem(d); restore_pending[d] = 0; clear_owed[d] = 0; ld_pend[d] = NULL; tc_seen[d] = 0; pv_active[d] = 0; pv_due[d] = 0; pv_idx[d] = -1;
+        if (!act_ok[d]) continue;
+        if (holder_of(d)) (void)request(d, OP_CLEAR, NULL, "row off");
+        fw_cue_dtor(act_buf[d]); act_ok[d] = 0; active_cid[d] = 0; spent[d] = 0; restore_pending[d] = 0;
+        n++;
+    }
+    LOG("row Active Loop -> OFF (applied now): %d armed loop(s) cleared; hooks and filter pass through, silent until it is on again", n);
+}
+static void row_went_on(void)
+{
+    unsigned bound = bind_noted();
+    for (int d = 0; d < NDECK; d++) {
+        tc_seen[d] = 0;
+        track_changed(d, "row on");
+        autoarm_done[d] = 1;               /* learn only: arming is still your choice (SHIFT+pad / SHIFT+MEMORY) */
+        hot_chk[d] = 0;
+    }
+    LOG("row Active Loop -> ON (applied now): loop lists re-learned from the live slots and the ANLZ files; decks bound from the facades seen while off: %s%s%s%s%s",
+        bound & 1u ? "1 " : "", bound & 2u ? "2 " : "", bound & 4u ? "3 " : "", bound & 8u ? "4 " : "", bound ? "" : "none (a deck binds at its next load or CALL)");
+}
+/* the Active Loop's in point for the playhead hook's re-arm test (INT64_MAX = nothing armed): nothing of a previous load */
+static void publish_arm(int d)
+{
+    uint32_t cf = __atomic_load_n(&cfg_bits, __ATOMIC_RELAXED);
+    int64_t a = (act_ok[d] && !spent[d] && (cf & CFG_ENABLE) && (cf & CFG_REARM)) ? active_in[d] : INT64_MAX;
+    __atomic_store_n(&arm_in[d], a, __ATOMIC_RELAXED);
+}
 static void my_tick(void)
 {
     tick_no++;
+    pin_keepwarm();
     sync_cfg();
-    __atomic_store_n(&FS.cfg, __atomic_load_n(&cfg_bits, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
+    uint32_t cf0 = __atomic_load_n(&cfg_bits, __ATOMIC_RELAXED);
+    __atomic_store_n(&FS.cfg, cf0, __ATOMIC_RELAXED);
+    int on = (cf0 & CFG_ENABLE) != 0;
+    if (!on) {
+        if (tk_row_was) { tk_row_was = 0; row_went_off(); }
+        drop_ring();
+        (void)__atomic_exchange_n(&deck_evt, 0, __ATOMIC_RELAXED);
+        poll_filter();                       /* side / press bookkeeping only: it is silent while off */
+        pend_service();                      /* applies the one clear queued above, silently */
+        pj_service();                        /* 0.2.9: a persist pair already started is finished (never half a delete + store) */
+        __atomic_store_n(&led_pub[0], 0u, __ATOMIC_RELAXED); __atomic_store_n(&led_pub[1], 0u, __ATOMIC_RELAXED);
+        for (int d = 0; d < NDECK; d++) {
+            __atomic_store_n(&hold_pub[d], holder_of(d), __ATOMIC_RELAXED);
+            __atomic_store_n(&arm_in[d], INT64_MAX, __ATOMIC_RELAXED);
+        }
+        return;
+    }
+    if (!tk_row_was) { tk_row_was = 1; row_went_on(); }
     deck_events();
+    poll_cids();            /* al028f: before loop_guard, so a load only the poll sees is handled as a load, not as a violation */
+    load_service();
+    loop_guard();
     poll_filter();          /* presses first, so events in this tick can correlate */
+    emp_refresh();
     drain_ring();
+    hot_sweep();
     try_restore();
     pend_service();
     watch_loops();
+    pj_service();
+    pv_service();
     anlz_service();
+    led_refresh();
     timing_log();
     for (int d = 0; d < NDECK; d++) {
         __atomic_store_n(&hold_pub[d], holder_of(d), __ATOMIC_RELAXED);
-        uint32_t cf = __atomic_load_n(&cfg_bits, __ATOMIC_RELAXED);
-        int64_t a = (act_ok[d] && !spent[d] && (cf & CFG_ENABLE) && (cf & CFG_REARM)) ? active_in[d] : INT64_MAX;
-        __atomic_store_n(&arm_in[d], a, __ATOMIC_RELAXED);
+        publish_arm(d);
     }
-    poll_cids();
     ready_flush();
     log_binds();
     flush_toast();
@@ -2189,12 +3568,13 @@ static void on_draw(az_draw *d, az_rect a, void *user)
     int y = a.y + row;
     const char *lines[] = {
         "SHIFT+MEMORY: next stored loop ahead.",
-        "SHIFT+pad: that hot cue loop.",
-        "SHIFT+DELETE: clear.",
-        "No playhead jump.",
-        "SHIFT combos off until restart (loops still arm).",
+        "SHIFT+loop pad: arm + save (pad red).",
+        "SHIFT+red pad again: off, flag removed.",
+        "DELETE+pad: delete the hot cue and its flag.",
+        "SHIFT+DELETE: clear. No playhead jump.",
+        "Filter off: SHIFT+pad deletes a hot cue!",
     };
-    int nl = filter_dead ? 5 : 4;   /* 0.2.7: the core switched the frame filter off */
+    int nl = filter_dead ? 6 : 5;   /* 0.2.7: the core switched the frame filter off */
     for (int i = 0; i < nl; i++) {
         if (y + row > a.y + a.h) return;
         /* 0.2.6: fit each line to the page width (narrow pages, harness draw-area gate) */
@@ -2228,6 +3608,20 @@ static int target_ok(uintptr_t va, const char *what)
     return 1;
 }
 
+/* 0.2.8: deleteCue (0x861218) must start with the exact two instructions we disassembled on
+ * 2.00/2.01, else it is not claimed (the observer only keeps the loop list fresh). */
+static int delete_target_ok(void)
+{
+    uint32_t ins[2];
+    if (!target_ok(VA_DELETE, "deleteCue")) return 0;
+    if (safe_read(VA_DELETE, ins, sizeof ins) != 0 || ins[0] != DELETE_INS0 || ins[1] != DELETE_INS1) {
+        LOG("precheck deleteCue %#lx: unexpected prologue (%08x %08x); claiming nothing", (unsigned long)VA_DELETE,
+            ins[0], ins[1]);
+        return 0;
+    }
+    return 1;
+}
+
 static int claim_all(void)
 {
     if (!target_ok(VA_STORE, "store") || !target_ok(VA_CALL, "call") || !target_ok(VA_LOAD, "load"))
@@ -2252,6 +3646,14 @@ static int claim_all(void)
         LOG("claim_hook engage-check 0x14b37a0 refused: no re-arm, set/clear from tick");
         orig_echeck = NULL;
     }
+    /* last: after init() every hook is a pass-through until al_live, and a refused or
+     * mismatching deleteCue claim only costs the delete observer (list refresh, clear on delete) */
+    orig_delete = NULL;
+    if (!delete_target_ok()) LOG("deleteCue observer NOT installed (loop list is refreshed from the live slots instead)");
+    else if (C->claim_hook(MOD_ID, VA_DELETE, (void *)my_delete, (void **)&orig_delete) != 0) {
+        LOG("claim_hook deleteCue refused (observer off; loop list is refreshed from the live slots)");
+        orig_delete = NULL;
+    } else LOG("deleteCue observer installed at %#lx (never swallows)", (unsigned long)VA_DELETE);
     return 0;
 }
 
@@ -2269,6 +3671,8 @@ static int init(const az_core_v1 *core)
         return 3;
     }
     probe_safe_read();
+    { uint64_t f = cnt_frq(); if (f) cnt_hz = f; }
+    pin_code();
     LOG("safe_read: %s", vm_mode == 1 ? "process_vm_readv" : "init-time /proc/self/maps snapshot");
     fw_set = (set_fn)VA_SET;
     fw_clear = (clear_fn)VA_CLEAR;
@@ -2284,12 +3688,17 @@ static int init(const az_core_v1 *core)
     fw_1525 = (int_fn)VA_1525;
     fw_engage = (engage_fn)VA_ENGAGE;
     fw_ls_looping = (ls_pred_fn)VA_LS_LOOPING;
+    {   /* 0.2.9: the firmware's memory-cue delete (mov x2,x1; mov w1,#0; b 0x86b218), used only to take our flagged copy / flag away */
+        uint32_t di[2];
+        if (safe_read(VA_STORE_DEL, di, sizeof di) == 0 && di[0] == 0xaa0103e2u && di[1] == 0x52800001u) fw_store_del = (store_del_fn)VA_STORE_DEL;
+        else LOG("memory delete 0x86b3f8: unexpected prologue; the Active Loop is not saved (armed for this session only)");
+    }
 
     if (AZ_HAS(C, register_row)) {
         const az_row_v1 en = {
             .size = sizeof en, .key = "enable", .label = "Active Loop",
             .kind = AZ_ROW_TOGGLE, .flags = AZ_ROW_DEFAULT_ON,
-            .help = "SHIFT+MEMORY next loop, SHIFT+pad hot loop, SHIFT+DELETE clear.",
+            .help = "SHIFT+MEMORY next loop, SHIFT+pad arm+save a hot loop (red pad; again = off), DELETE+pad delete, SHIFT+DELETE clear.",
             .on_change = row_changed, .user = (void *)"Active Loop",
         };
         h_enable = C->register_row(MOD_ID, &en);
@@ -2342,8 +3751,10 @@ static int init(const az_core_v1 *core)
 
     if (!AZ_HAS(C, banner)) LOG("warning: core has no banner");
     sync_cfg();
+    tk_row_was = row_on();       /* 0.2.8: a start with the row off is silent; only a toggle is logged */
+    memset(ring, 0, sizeof ring);                 /* pre-touch: no first-use page fault in a hook */
     __atomic_store_n(&al_live, 1, __ATOMIC_RELEASE);
-    LOG("loaded 0.2.7; template-free ANLZ build, flags at parse, wait-free filter/hot path, updatable toast (%s); setout=%d",
+    LOG("loaded 0.2.10; filter: SHIFT+MEMORY/DELETE, SHIFT+pad arm+save when nothing of yours is lost (second press off), red pad, DELETE+pad (+ our own saved copy); deleteCue observer; template-free ANLZ build, flags at parse, wait-free filter/hot path, updatable toast (%s); setout=%d",
         tsurf ? "surface" : "banner queue", orig_setout != NULL);
     return 0;
 }
@@ -2355,7 +3766,7 @@ static const char *const FW_TAGS[] = { FW_TAG, NULL };
 #endif
 static const az_mod_v1 MOD = {
     .abi = AZ_MOD_ABI, .size = sizeof(az_mod_v1), .id = MOD_ID,
-    .fw_tags = FW_TAGS, .init = init, .tick = my_tick, .on_frame = NULL,
+    .fw_tags = FW_TAGS, .init = init, .tick = my_tick, .on_frame = on_led,
 };
 
 const az_mod_v1 *az_mod_v1_entry(void) { return &MOD; }
