@@ -48,6 +48,7 @@ static void anlz_add(int d, int hot, int64_t in, int64_t out, int flag)
 static void reset_state(void)
 {
     nrec = 0; copy_n = 0; nlog = 0; lastlog[0] = 0;
+    toast_last[0] = 0; toast_last_tick = -100000;   /* 0.2.14: each case starts with no recent pop-up */
     for (int d = 0; d < NDECK; d++) {
         act_ok[d] = 0; spent[d] = 0; pend_op[d] = OP_IDLE; act_src_hot[d] = 0; act_src_idx[d] = 0; active_cid[d] = 0;
         for (int k = 0; k < NHOT; k++) hot_ok[d][k] = 0;

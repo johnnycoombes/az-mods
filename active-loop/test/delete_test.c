@@ -43,6 +43,7 @@ static int fake_deck_info(int deck, az_deck_info *o) { o->pad_mode = fake_padmod
 static void reset_state(void)
 {
     orig_n = 0; orig_kind = -1; copy_n = 0;
+    toast_last[0] = 0; toast_last_tick = -100000;   /* 0.2.14: each case starts with no recent pop-up */
     for (int d = 0; d < NDECK; d++) {
         act_ok[d] = 0; spent[d] = 0; pend_op[d] = OP_IDLE; act_src_hot[d] = 0; act_src_idx[d] = 0; active_cid[d] = 0;
         for (int k = 0; k < NHOT; k++) { hot_ok[d][k] = 0; }
@@ -266,7 +267,7 @@ int main(void)
     pos_now[0] = 465256 + 44100 * 5; pos_seq[0] = 1; ex_inside[0] = 1; ex_past[0] = 2;
     tk_row_was = 1; nlog = 0;
     my_tick();
-    assert(nlog > 0 && toast_pending);                                          /* "exited ... Active Loop done" */
+    assert(nlog > 0 && !toast_pending);                                         /* "exited ... Active Loop done": since 0.2.14 log only, no pop-up */
     /* off -> on re-learns, arms nothing */
     reset_state(); row_state = 0; tk_row_was = 1; my_tick(); row_state = 1;
     mkcue(SLOT0[6], 1, 777777, 888888);
@@ -295,7 +296,7 @@ int main(void)
     reset_state(); put_hot(0, 4, 3000000, 3500000); mkcue(SLOT0[4], 0, 3000000, 0); mkpos(SLOT0[4]);
     apply_pad(0, 0, 4); assert(!hot_ok[0][4] && !act_ok[0] && FS.req == (RQ_VALID | (1u << 3)));
     reset_state(); ls_of[1] = NULL; apply_pad(1, 1, 2);
-    assert(FS.req == 0 && !act_ok[1] && toast_pending && !strcmp(toast_text, "Active Loop: deck not ready"));
+    assert(FS.req == 0 && !act_ok[1] && !toast_pending);   /* 0.2.14: "deck not ready" is log only */
     ls_of[1] = LS1;
     reset_state(); apply_pad(0, 0, 0); apply_pad(0, 0, 9); assert(FS.req == 0 && !toast_pending);
 

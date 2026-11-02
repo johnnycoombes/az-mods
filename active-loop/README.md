@@ -18,6 +18,23 @@ Community mod for AZ-MODS on the Pioneer XDJ-AZ (EP147 2.00 / 2.01).
 
 SHIFT+CALL is not used by the mod. (Earlier notes said stock doubles/halves the loop with it. Correction: stock CALL picks double or half from the loop state, not from SHIFT.)
 
+## 0.2.14 - fewer pop-ups
+
+0.2.13 and earlier showed a pop-up for almost everything. Now a pop-up appears **only when the track's loops change**, and then **once**:
+
+- a loop is **saved** (*Active Loop saved: hot cue at ...*), or armed but **not saved** (*NOT saved: ...*, including when the firmware did not store it);
+- the Active Loop is turned **off** (SHIFT+the armed pad, or SHIFT+DELETE);
+- the Active Loop's loop is **deleted** (*Active Loop cleared (loop deleted)*), including the case where its saved copy cannot be removed right now;
+- the SHIFT combos are switched off by the core (*SHIFT combos off until restart*).
+
+The **ready, auto-arm, SHIFT+MEMORY pick and done** notices (and *deck not ready* / *no stored loop ahead*) are now **log-only**: they are written to the mod's log but nothing is shown on the deck.
+
+**Repeat filter:** the same pop-up text is shown at most once in a **4-second window**; a repeat inside that window goes to the log only.
+
+New Mod Menu row **Pop-up messages** (default **on**). With it **off** no pop-up is shown at all, and the **pulsing pad** (see 0.2.11/0.2.12) is the only indicator that a loop is armed. The **Pulse armed pad** row still works on its own.
+
+Nothing else changed: DELETE+pad, SHIFT+pad arm/save, the safety rules and the pad colours are as in 0.2.13.
+
 ## 0.2.13 - DELETE + pad works on the deck
 
 Holding DELETE and pressing a hot cue pad (a loop pad too) removed nothing on the real deck in 0.2.12, and because SHIFT+pad on a loop pad *arms* it instead of deleting it, the pad could not be removed at all. The mod turns DELETE+pad into SHIFT+pad for stock, and it used to put the SHIFT bit one input frame ahead of the pad. One frame is 60 ms or more on the emulator (17 frames/s, where every test passed) but about 1 ms on the deck (about 1000 frames/s), so stock saw SHIFT and the pad at the same instant. Now the pad pressed under DELETE is eaten and sent as a proper SHIFT+pad: **SHIFT alone for 40 ms, then SHIFT+pad for 40 ms, then both up** (one frame ahead at the emulator's rate, as before). A quick tap is delivered whole. A plain pad pressed in the 80 ms after a DELETE+pad is held back until the mod's SHIFT is gone, so it can never be read as SHIFT+pad. If a DELETE+pad is not followed by a hot cue delete within 0.8 s, the log says so and the next one leads by twice as long (80, then 160 ms). The SHIFT+pad replay for a point cue uses the same lead. Nothing else changed.

@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-only
  *
- * active-loop 0.2.13 — Active Loop Picker for EP147 (XDJ-AZ 2.00/2.01).
+ * active-loop 0.2.14 — Active Loop Picker for EP147 (XDJ-AZ 2.00/2.01).
  *
+ * 0.2.14: pop-ups only when the track's loops change (saved / off / deleted / not saved), each once;
+ *         ready, picks, auto-arm and done notices go to the log only. New row "Pop-up messages" (default on).
  * 0.2.13: DELETE+pad works on the real deck (Johnny's 0.2.12 report: holding DELETE and pressing a loop hot-cue pad removed nothing, so
  *        a pad could not be removed at all: SHIFT+pad is the mod's ARM gesture on a loop pad, DELETE+pad was its only delete).
  *        The filter used to turn DELETE+pad into SHIFT+pad by setting the SHIFT bit one ERP frame ahead of the pad. One frame is 60+ ms on
@@ -533,6 +535,7 @@ static uint64_t now_ns(void)
 static int h_autoadv = -1, h_rearm = -1;
 static int h_enable = -1;
 static int h_pulse = -1;                    /* 0.2.11: Mod Menu row "Pulse armed pad" */
+static int h_popups = -1;                   /* 0.2.14: Mod Menu row "Pop-up messages" */
 static uint32_t cfg_bits = (1u) | (0u << 1) | (1u << 3) | (1u << 4) | (1u << 5);
 enum { CFG_ENABLE = 1u << 0, CFG_HOTCUE = 1u << 3, CFG_CLEAR = 1u << 4, CFG_TOAST = 1u << 5,
        CFG_AUTOADV = 1u << 6, CFG_REARM = 1u << 7, CFG_PULSE = 1u << 8 };
@@ -694,7 +697,20 @@ static void do_toast_ms(const char *text, int ms, int ready_deck)  /* text: copi
     toast_pending = 1;
     toast_due = tick_no + TOAST_COALESCE_TICKS;
 }
-static void do_toast(const char *text) { do_toast_ms(text, 2500, -1); }
+/* 0.2.14: pop-ups only for changes to the track's loops (saved / off / deleted / not saved).
+ * Routine notices (ready, picks, auto-arm, done, no loop ahead, deck not ready) go to the log only.
+ * The same change text within 4 s is shown once. Mod Menu row "Pop-up messages" turns them all off. */
+static int toast_change;
+static char toast_last[96];            /* 0.2.14: last change pop-up, for the 4 s repeat filter */
+static long toast_last_tick = -100000;
+static void do_toast(const char *text)
+{
+    if (!toast_change) { LOGC("toast (routine, log only): %s", text); return; }
+    if (tick_no - toast_last_tick < 240 && strncmp(toast_last, text, sizeof toast_last - 1) == 0) { LOGC("toast repeat dropped: %s", text); return; }
+    snprintf(toast_last, sizeof toast_last, "%s", text); toast_last_tick = tick_no;
+    do_toast_ms(text, 2500, -1);
+}
+static void do_toast_chg(const char *text) { toast_change = 1; do_toast(text); toast_change = 0; }
 static __attribute__((noinline)) void flush_toast(void)
 {
     if (tsurf) { if (ts_shown && now_ns() >= ts_hide_ns) ts_hide("timeout"); return; }
@@ -1558,7 +1574,7 @@ static void ready_flush(void)
         for (int k = 0; k < 3; k++)
             if (ready_tick[d][k] && tick_no >= ready_tick[d][k]) {
                 ready_tick[d][k] = 0;
-                if (!toast_pending && !(ts_shown && ts_ready_deck < 0)) do_toast_ms(TXT[d], 2500, d); else ready_tick[d][k] = tick_no + 30;
+                if (1) LOGC("ready (log only, 0.2.14): %s", TXT[d]); else ready_tick[d][k] = tick_no + 30;
                 return;
             }
 }
@@ -1961,8 +1977,9 @@ static void toastf(const char *fmt, const char *a)
     static char ring_txt[8][112]; static int k;
     char *b = ring_txt[k++ & 7];
     snprintf(b, 112, fmt, a);
-    do_toast_ms(b, 1500, -1);
+    do_toast(b);
 }
+static void toastf_chg(const char *fmt, const char *a) { toast_change = 1; toastf(fmt, a); toast_change = 0; }
 static int request(int d, int op, const void *cue, const char *why)
 {
     uint32_t cur = __atomic_load_n(&pend_op[d], __ATOMIC_ACQUIRE);
@@ -2224,7 +2241,7 @@ static int clear_active(int d, const char *why)
 static void apply_clear(int d)
 {
     if (!holder_of(d)) { LOG("clear abort: deck %d not bound", d + 1); do_toast("Active Loop: deck not ready"); return; }
-    if (clear_active(d, "clear") == 0) do_toast("Active Loop cleared");
+    if (clear_active(d, "clear") == 0) do_toast_chg("Active Loop cleared");
 }
 
 /* ---- 0.2.9: ACTIVE LOOP PERSISTENCE ----
@@ -2549,7 +2566,7 @@ static void hot_gone_active(int d, int k)
     if (!holder_of(d)) { fw_cue_dtor(act_buf[d]); act_ok[d] = 0; active_cid[d] = 0; spent[d] = 0; }
     else if (clear_active(d, "hot cue deleted") != 0) return;
     LOG("deck %d: the armed loop (hot cue %d) was deleted -> Active Loop cleared", d + 1, k);
-    do_toast("Active Loop cleared (loop deleted)");
+    do_toast_chg("Active Loop cleared (loop deleted)");
 }
 /* Compare each cached hot cue loop with its live slot. The slot read is a tick job. */
 static long hot_chk[NDECK];
@@ -2609,7 +2626,7 @@ static void mem_gone(int d, int i)
         if (!holder_of(d)) { fw_cue_dtor(act_buf[d]); act_ok[d] = 0; active_cid[d] = 0; spent[d] = 0; }
         else if (clear_active(d, "memory cue deleted") != 0) return;
         LOG("deck %d: the armed loop (memory #%d) was deleted -> Active Loop cleared", d + 1, i);
-        do_toast("Active Loop cleared (loop deleted)");
+        do_toast_chg("Active Loop cleared (loop deleted)");
     }
 }
 static void on_delete_ev(ev_t *e)
@@ -2785,14 +2802,14 @@ static void al_off(int d, int kind)
     int pc = persist_clear(d, c);
     if (pc == PC_FAIL) {
         LOG("deck %d: SHIFT+pad on the armed pad (hot cue %d at %s): saved copy cannot be removed now, Active Loop stays on", d + 1, kind, t);
-        do_toast("Active Loop stays on: saved copy not removable now (press MEMORY once, try again)");
+        do_toast_chg("Active Loop stays on: saved copy not removable now (press MEMORY once, try again)");
         return;
     }
     if (act_ok[d] && clear_active(d, "SHIFT+pad toggle off") != 0) return;     /* busy: press again */
     LOG("deck %d: SHIFT+pad on the armed pad (hot cue %d at %s): Active Loop off%s", d + 1, kind, t,
         pc == PC_DONE ? ", saved flag removed" : pc == PC_KEPT ? ", the saved flag of another loop stays" : " (nothing saved for it)");
-    if (pc == PC_KEPT) toastf("Active Loop off at %s (its saved flag stays in the track)", t);
-    else toastf("Active Loop off: hot cue at %s", t);
+    if (pc == PC_KEPT) toastf_chg("Active Loop off at %s (its saved flag stays in the track)", t);
+    else toastf_chg("Active Loop off: hot cue at %s", t);
 }
 static void apply_pad(int s, int d, int kind)
 {
@@ -2809,7 +2826,7 @@ static void apply_pad(int s, int d, int kind)
         if (pr != 0) return;
         char t[32]; fmt_time(t, sizeof t, cue_in(hot_buf[d][kind]));
         int ps = persist_set(d, hot_buf[d][kind]);
-        toastf(ps == PS_OK ? "Active Loop saved: hot cue at %s" :
+        toastf_chg(ps == PS_OK ? "Active Loop saved: hot cue at %s" :
                ps == PS_HAVE ? "Active Loop armed at %s (already saved)" :
                ps == PS_NOSTORE ? "Active Loop armed at %s (not saved yet)" :
                ps == PS_FULL ? "Active Loop armed at %s, NOT saved: memory list full" :
@@ -2931,6 +2948,7 @@ static void sync_cfg(void)
         if (h_autoadv >= 0 && C->row_value(h_autoadv) != 1) b &= ~CFG_AUTOADV;
         if (h_rearm >= 0 && C->row_value(h_rearm) != 1) b &= ~CFG_REARM;
         if (h_pulse >= 0 && C->row_value(h_pulse) != 1) b &= ~CFG_PULSE;
+        if (h_popups >= 0 && C->row_value(h_popups) != 1) b &= ~CFG_TOAST;
     }
     b |= ((uint32_t)COMBO_SHIFT_MEMORY & 3u) << 1;
     __atomic_store_n(&cfg_bits, b, __ATOMIC_RELAXED);
@@ -3141,7 +3159,7 @@ static void pv_report(int d, const anlz_res_t *r)
         } else if (hit == 0) {
             LOG("deck %d: the firmware did not store the flagged copy at %s: forgotten, nothing will be deleted", d + 1, t);
             mem_drop(d, i);
-            do_toast("Active Loop: NOT saved (the firmware did not store it)");
+            do_toast_chg("Active Loop: NOT saved (the firmware did not store it)");
         } else {
             mem_mine[d][i] = OWN_NONE;
             LOG("deck %d: not sure the flagged loop at %s is our copy (%d flagged, %d memory loops, expected %d): the mod will not delete it", d + 1, t, fl, mem, pv_pre[d]);
@@ -3465,7 +3483,7 @@ static void poll_filter(void)
             LOG("frame filter is not running (no ERP frames for ~3 s): SHIFT+MEMORY / SHIFT+DELETE off "
                 "until EP147 restarts; SHIFT+pad / DELETE+pad are stock again (SHIFT+pad deletes a hot cue, a loop too); "
                 "auto-arm, engage and Auto-advance still on");
-            do_toast("Active Loop on; SHIFT combos off until restart");
+            do_toast_chg("Active Loop on; SHIFT combos off until restart");
         }
     } else {
         if (filter_dead) { filter_dead = 0; LOG("frame filter running again"); }
@@ -3817,6 +3835,13 @@ static int init(const az_core_v1 *core)
             .on_change = row_changed, .user = (void *)"Pulse armed pad",
         };
         h_pulse = C->register_row(MOD_ID, &pu);
+        const az_row_v1 po = {
+            .size = sizeof po, .key = "popups", .label = "Pop-up messages",
+            .kind = AZ_ROW_TOGGLE, .flags = AZ_ROW_DEFAULT_ON, .parent = "enable",
+            .help = "Show a message once when a loop is saved, turned off or deleted. Off: no pop-ups (the pad shows the state).",
+            .on_change = row_changed, .user = (void *)"Pop-up messages",
+        };
+        h_popups = C->register_row(MOD_ID, &po);
     }
 
     {
