@@ -14,11 +14,14 @@ will not load them on any other firmware.
 
 ## Install
 
-On the deck: **Mod Menu > Community Mods > Repositories > Add**, enter `johnnycoombes/az-mods`,
-then install from **Browse** and press **Reload now**.
+This repository is listed in the official AZ-MODS community index,
+[Kyle-Hosman/az-mods-index](https://github.com/Kyle-Hosman/az-mods-index), so every XDJ-AZ running
+AZ-MODS shows it by default, with nothing to add. On the deck: **Mod Menu > Community Mods**, find
+**johnnycoombes/az-mods** under **Repositories**, pick a mod in **Browse**, install it, and press
+**Reload now**. The index only lists the repository; the mods themselves come from this repository's
+GitHub releases.
 
-This repository is not (yet) in the Mod Index, so its mods show "Not in the Mod Index". Mods run
-with full access to the deck: install what you trust, and keep a spare stick for trying new mods.
+Mods run with full access to the deck: install what you trust, and keep a spare stick for trying new mods.
 
 ## Build
 
