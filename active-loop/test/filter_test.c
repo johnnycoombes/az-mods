@@ -27,7 +27,11 @@ static void idle(void){ memset(ish,0,sizeof ish); memset(imm,0,sizeof imm); mems
 #define HAS_MM(s)  ((F[SO[s].mem_o] >> SO[s].mem_b) & 1u)
 #define PAD(s)     (F[SO[s].pad_o])
 static unsigned nibv(int s, int pos){ return (unsigned)((FS.snap >> (28*s + pos)) & 15u); }
-static void expire(void){ FS.rp_frames = 0; step(); FS.rp_frames = 40; }
+static void expire(void){
+    FS.rp_frames = 0; step(); FS.rp_frames = 40;
+    /* 0.2.15: a DELETE+pad SHIFT hold ends by itself once DELETE is up and the pad press is over: drain it (inputs as they are) */
+    for (int i = 0; i < 600 && (FS.sh_on[0] || FS.sh_on[1] || FS.rp[0] || FS.rp[1]) && !idl[0] && !idl[1]; i++) step();
+}
 int main(void){
     prewarm_filter();
     assert(FS.snap==0 && FS.prev==0 && !FS.req && !FS.rp[0] && !FS.rp[2]);
@@ -71,9 +75,17 @@ int main(void){
     assert(!HAS_DL(0) && HAS_SH(0) && PAD(0)==0);      /* SHIFT leads the pad by one frame */
     step(); assert(!HAS_DL(0) && HAS_SH(0) && PAD(0)==4);
     ipad[0]=0; step(); assert(HAS_SH(0) && PAD(0)==4 && !HAS_DL(0));   /* finger up: the replay still delivers the whole press (0.2.13) */
-    expire(); assert(!HAS_SH(0) && PAD(0)==0 && !HAS_DL(0));
-    idl[0]=0; step();                                    /* DELETE released after a pad: NO tap */
-    assert(!HAS_DL(0) && !FS.rp[2] && !FS.rp[0]);
+    for (int i = 0; i < 60; i++) step();
+    assert(HAS_SH(0) && PAD(0)==0 && !HAS_DL(0));        /* 0.2.15: the press is over, SHIFT stays down for the whole DELETE hold (one SHIFT press) */
+    idl[0]=0; step();                                    /* DELETE released after a pad: NO tap; SHIFT released once */
+    assert(!HAS_SH(0) && PAD(0)==0 && !HAS_DL(0) && !FS.rp[2] && !FS.rp[0] && !FS.sh_on[0]);
+    /* 0.2.15: three pads under ONE DELETE hold: SHIFT is down from the first pad to the DELETE release, never up in between */
+    idle(); idl[0]=1; step();
+    for (int k = 0; k < 3; k++) {
+        ipad[0] = (unsigned)(1u << k); step(); assert(HAS_SH(0)); step(); assert(HAS_SH(0) && (PAD(0) & (1u << k)) && !HAS_DL(0));
+        ipad[0] = 0; for (int i = 0; i < 60; i++) { step(); assert(HAS_SH(0) && !HAS_DL(0)); }
+    }
+    idl[0]=0; step(); assert(!HAS_SH(0) && PAD(0)==0 && !FS.sh_on[0] && !HAS_DL(0)); idle();
     /* ... pad released after DELETE: same */
     idl[0]=1; step(); ipad[0]=128; step(); assert(HAS_SH(0) && PAD(0)==0); step(); assert(HAS_SH(0) && PAD(0)==128);
     idl[0]=0; step(); assert(PAD(0)==128 && HAS_SH(0) && !HAS_DL(0));   /* DELETE up first: the press is still being delivered, no DELETE leaks */

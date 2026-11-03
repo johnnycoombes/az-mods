@@ -1,9 +1,16 @@
 /* SPDX-License-Identifier: GPL-3.0-only
  *
- * active-loop 0.2.14 — Active Loop Picker for EP147 (XDJ-AZ 2.00/2.01).
+ * active-loop 0.2.15 — Active Loop Picker for EP147 (XDJ-AZ 2.00/2.01).
  *
- * 0.2.14: pop-ups only when the track's loops change (saved / off / deleted / not saved), each once;
- *         ready, picks, auto-arm and done notices go to the log only. New row "Pop-up messages" (default on).
+ * 0.2.15: (1) DELETE+pad no longer taps SHIFT once per pad. The synthetic SHIFT of a DELETE+pad is ONE hold per DELETE hold: it goes down once,
+ *         40 ms (fixed lead, the 0.2.13 escalation 40/80/160 ms is gone) before the first pad, stays down across every pad of the hold,
+ *         and comes up once, when DELETE is up, no pad press is still being replayed and it has been down for 300 ms. A new hold never starts
+ *         within 300 ms of the last release (its first pad waits, eaten). Every abort (bus stall, row off, hot cue pads off) releases it at once.
+ *         Johnny's report on 0.2.14 (= 0.2.13's filter): after DELETE+pad the deck stayed in SHIFT mode (jog scrolled fast): three pads in a hold
+ *         were three SHIFT taps 60 ms apart, which the deck can read as a SHIFT lock. Side effect, by design: a plain DELETE tap within
+ *         300 ms of a DELETE+pad is not replayed (our SHIFT is still down: it would reach stock as SHIFT+DELETE).
+ *         (2) New Mod Menu row "Pop-up messages" (default on): off = no text pop-ups at all (CFG_TOAST, which already gated every toast).
+ *         Nothing else changed from 0.2.13 (0.2.14's pop-up rework is NOT in this release).
  * 0.2.13: DELETE+pad works on the real deck (Johnny's 0.2.12 report: holding DELETE and pressing a loop hot-cue pad removed nothing, so
  *        a pad could not be removed at all: SHIFT+pad is the mod's ARM gesture on a loop pad, DELETE+pad was its only delete).
  *        The filter used to turn DELETE+pad into SHIFT+pad by setting the SHIFT bit one ERP frame ahead of the pad. One frame is 60+ ms on
@@ -458,7 +465,7 @@ static struct __attribute__((aligned(64))) {
         uint8_t  dh[2];     /* filter-only: DELETE held (not with SHIFT first) since this frame count started */
         uint8_t  du[2];     /* filter-only: a pad or SHIFT joined that DELETE hold: it is not a tap */
         uint8_t  dh_t0[2];  /* filter-only: heartbeat count at DELETE down; after the release: start of the tap replay */
-        uint8_t  sl[2];     /* filter-only: unused since 0.2.13 (was: SHIFT asserted by the filter on the previous frame) */
+        uint8_t  sh_on[2];  /* filter-only (0.2.15): the synthetic SHIFT hold of a DELETE+pad is open on this side (one SHIFT press per DELETE hold) */
         uint8_t  hd[2];     /* filter-only (0.2.13): pad bits that went down while a SHIFT+pad replay was running: held back until it ends, so stock never sees them under our SHIFT */
         uint32_t fi;        /* filter-only (tick reads): running estimate of the TYPICAL frame interval, cntvct ticks (0.2.8 al028d) */
         uint8_t  fn;        /* filter-only (tick reads): intervals measured so far, saturates at 255 */
@@ -485,15 +492,22 @@ static struct __attribute__((aligned(64))) {
         uint32_t rp_frames; /* tick writes: replay length in FRAMES (40 ms at the measured frame rate) */
         uint32_t lead_frames; /* tick writes (0.2.13): SHIFT leads a synthesized SHIFT+pad by this many FRAMES (>= 1; 40 ms at the measured rate) */
         uint32_t emp;       /* tick writes while DELETE is held on a side: pad bits known EMPTY (side A bits 0..7, side B 8..15), else 0 */
+        uint32_t gap_frames; /* tick writes (0.2.15): 300 ms in FRAMES at the measured rate: minimum time the synthetic SHIFT stays down, and minimum time it stays up between two holds */
+    };
+    struct __attribute__((aligned(64))) {       /* line 3 (0.2.15): the synthetic SHIFT hold, filter-owned */
+        uint32_t fc;        /* frame counter (every call), wraps; all times below are differences of it */
+        uint32_t sh_t0[2];  /* frame count at which the synthetic SHIFT goes down (may be in the future: it waits out the gap after the last release) */
+        uint32_t sh_up[2];  /* frame count of the last release of the synthetic SHIFT (0 = never) */
+        uint32_t pad_end[2];/* frame count at which the replayed pad press ends */
     };
 } FS;
 #define RQ_VALID 0x100u
 #define FI_MIN 16u                  /* intervals needed before the stall test and the replay length are trusted */
 #define FI_CAP 0x40000000ull        /* one interval sample, cntvct ticks (caps a stall that opens the measurement) */
-_Static_assert(sizeof FS == 192 && __builtin_offsetof(typeof(FS), fmax) == 64 && __builtin_offsetof(typeof(FS), cfg) == 128, "FS: three lines, one writer each");
+_Static_assert(sizeof FS == 256 && __builtin_offsetof(typeof(FS), fmax) == 64 && __builtin_offsetof(typeof(FS), cfg) == 128 && __builtin_offsetof(typeof(FS), fc) == 192, "FS: four lines, one writer each");
 #define LEAD_MS_MIN 40u                  /* SHIFT alone before a synthesized SHIFT+pad: a hand needs more than this */
-#define LEAD_MS_MAX 160u
-static uint32_t lead_ms = LEAD_MS_MIN;   /* tick-only; raised when a DELETE+pad was not followed by a hot cue delete */
+static uint32_t lead_ms = LEAD_MS_MIN;   /* tick-only; fixed since 0.2.15 (0.2.13 doubled it after a DELETE+pad without a delete: 40/80/160 ms) */
+#define GAP_MS 300u                      /* 0.2.15: the synthetic SHIFT never goes up or down again within 300 ms of its last edge */
 static uint64_t dlp_wait_ns;             /* tick-only: when the last DELETE+pad was seen by the tick, until its delete is confirmed or missed */
 static int      dlp_got;                 /* tick-only: a hot cue deleteCue (kind >= 1) arrived since */
 static uint64_t tk_snap;               /* tick-only: last snapshot processed */
@@ -534,8 +548,8 @@ static uint64_t now_ns(void)
 
 static int h_autoadv = -1, h_rearm = -1;
 static int h_enable = -1;
+static int h_popups = -1;                   /* 0.2.15: Mod Menu row "Pop-up messages" */
 static int h_pulse = -1;                    /* 0.2.11: Mod Menu row "Pulse armed pad" */
-static int h_popups = -1;                   /* 0.2.14: Mod Menu row "Pop-up messages" */
 static uint32_t cfg_bits = (1u) | (0u << 1) | (1u << 3) | (1u << 4) | (1u << 5);
 enum { CFG_ENABLE = 1u << 0, CFG_HOTCUE = 1u << 3, CFG_CLEAR = 1u << 4, CFG_TOAST = 1u << 5,
        CFG_AUTOADV = 1u << 6, CFG_REARM = 1u << 7, CFG_PULSE = 1u << 8 };
@@ -697,20 +711,7 @@ static void do_toast_ms(const char *text, int ms, int ready_deck)  /* text: copi
     toast_pending = 1;
     toast_due = tick_no + TOAST_COALESCE_TICKS;
 }
-/* 0.2.14: pop-ups only for changes to the track's loops (saved / off / deleted / not saved).
- * Routine notices (ready, picks, auto-arm, done, no loop ahead, deck not ready) go to the log only.
- * The same change text within 4 s is shown once. Mod Menu row "Pop-up messages" turns them all off. */
-static int toast_change;
-static char toast_last[96];            /* 0.2.14: last change pop-up, for the 4 s repeat filter */
-static long toast_last_tick = -100000;
-static void do_toast(const char *text)
-{
-    if (!toast_change) { LOGC("toast (routine, log only): %s", text); return; }
-    if (tick_no - toast_last_tick < 240 && strncmp(toast_last, text, sizeof toast_last - 1) == 0) { LOGC("toast repeat dropped: %s", text); return; }
-    snprintf(toast_last, sizeof toast_last, "%s", text); toast_last_tick = tick_no;
-    do_toast_ms(text, 2500, -1);
-}
-static void do_toast_chg(const char *text) { toast_change = 1; do_toast(text); toast_change = 0; }
+static void do_toast(const char *text) { do_toast_ms(text, 2500, -1); }
 static __attribute__((noinline)) void flush_toast(void)
 {
     if (tsurf) { if (ts_shown && now_ns() >= ts_hide_ns) ts_hide("timeout"); return; }
@@ -952,6 +953,29 @@ static const struct { uint8_t sh_o, sh_b, mem_o, mem_b, del_o, del_b, pad_o; } S
     { B_SH_O, B_SH_B, B_MEM_O, B_MEM_B, B_DEL_O, B_DEL_B, B_PAD_O },
 };
 
+/* 0.2.15: the synthetic SHIFT of DELETE+pad is ONE hold per DELETE hold (0.2.13/0.2.14 gave every pad its own SHIFT pulse: three pads =
+ * three SHIFT taps 60 ms apart, which the deck can read as a SHIFT double-tap = SHIFT lock, "stuck in SHIFT mode"). Rules:
+ *  - it goes down once, `ln` frames (40 ms, fixed, no escalation) before the first pad, and stays down across every pad of the hold;
+ *  - it comes up once: DELETE is up, no pad is still being replayed, and it has been down for at least gap_frames (300 ms);
+ *  - a new hold never starts less than gap_frames (300 ms) after the last release (the first pad waits, eaten, never leaked);
+ *  - every abort (stall, row/hot-cue pads off, filter off) releases it at once and sets the release time. */
+static inline __attribute__((always_inline)) void hold_drop(int s, uint32_t fc)
+{
+    FS.sh_on[s] = 0; FS.rp[s] = 0; FS.pad_end[s] = 0; FS.sh_up[s] = fc;
+}
+static inline __attribute__((always_inline)) void hold_go(int s, unsigned bits, uint32_t fc, uint32_t ln, uint32_t rpf, uint32_t gap)
+{
+    if (!FS.sh_on[s]) {
+        uint32_t t = fc;
+        if (FS.sh_up[s]) { uint32_t g = FS.sh_up[s] + gap; if ((int32_t)(g - fc) > 0) t = g; }
+        FS.sh_on[s] = 1; FS.sh_t0[s] = t;
+    }
+    FS.rp[s] = (uint8_t)(FS.rp[s] | bits);
+    uint32_t ps = FS.sh_t0[s] + ln;
+    if ((int32_t)(ps - fc) < 0) ps = fc;
+    FS.pad_end[s] = ps + rpf;
+}
+
 /* 0.2.8 filter (fallback design; stock SHIFT+pad is a hot cue DELETE and cannot be swallowed):
  *   SHIFT+pad          pad eaten (no stock delete); the tick arms a loop pad, or asks for a replay
  *                      of the SHIFT+pad (FS.req) when the pad is a point cue, so stock deletes it.
@@ -974,14 +998,18 @@ static inline __attribute__((always_inline)) void erp_work(unsigned char *frame,
     unsigned hb = (unsigned)(sn >> 56);
     if (__builtin_expect(hb == 0, 0))                    /* once per 256 frames: the tick derives the frame rate */
         __atomic_store_n(&FS.stamp, (((FS.stamp >> 40) + 1) << 40) | (t0 & STAMP_MASK), __ATOMIC_RELAXED);
-    if (!(cfg & CFG_ENABLE)) { __atomic_store_n(&FS.snap, sn, __ATOMIC_RELAXED); return; }
+    const uint32_t fc = ++FS.fc;
+    if (!(cfg & CFG_ENABLE)) {
+        for (int s = 0; s < 2; s++) if (FS.sh_on[s]) hold_drop(s, fc);        /* row off: no synthetic SHIFT is left behind */
+        __atomic_store_n(&FS.snap, sn, __ATOMIC_RELAXED); return;
+    }
     uint32_t cur = SIDE_BITS(frame, A) | (SIDE_BITS(frame, B) << 14);
     uint32_t prev = FS.prev;
     uint32_t rpw; memcpy(&rpw, FS.rp, sizeof rpw);
     uint16_t pew; memcpy(&pew, FS.pe, sizeof pew);
     /* fast path: nothing relevant changed, SHIFT and DELETE up on both sides, nothing pending */
     if (__builtin_expect(((cur ^ prev) & 0x0fffffffu) == 0 && (prev >> 31) &&
-                         !(cur & (5u | (5u << 14))) && !rpw && !pew &&
+                         !(cur & (5u | (5u << 14))) && !rpw && !pew && !(FS.sh_on[0] | FS.sh_on[1]) &&
                          !__atomic_load_n(&FS.req, __ATOMIC_RELAXED), 1)) {
         __atomic_store_n(&FS.snap, sn, __ATOMIC_RELAXED);
         return;
@@ -994,15 +1022,18 @@ static inline __attribute__((always_inline)) void erp_work(unsigned char *frame,
     int do_clr = (cfg & CFG_CLEAR) != 0;
     int do_pad = (cfg & CFG_HOTCUE) != 0;
     uint32_t rq = __atomic_load_n(&FS.req, __ATOMIC_RELAXED);
-    if (rq) {                                        /* the tick asks: replay SHIFT+pad once */
-        unsigned rs = (rq >> 9) & 1u;
-        __atomic_store_n(&FS.req, 0, __ATOMIC_RELAXED);
-        FS.rp[rs] = (uint8_t)(rq & 0xffu); FS.rp_t0[rs] = (uint8_t)hb;
-    }
     const uint32_t rpf = FS.rp_frames;
     uint32_t ln = __atomic_load_n(&FS.lead_frames, __ATOMIC_RELAXED);
     if (ln < 1) ln = 1;
     if (ln + rpf > 250u) ln = rpf < 250u ? 250u - rpf : 1u;
+    uint32_t gap = __atomic_load_n(&FS.gap_frames, __ATOMIC_RELAXED);
+    if (gap < 1) gap = 1;
+    if (rq) {                                        /* the tick asks: replay SHIFT+pad once */
+        unsigned rs = (rq >> 9) & 1u;
+        __atomic_store_n(&FS.req, 0, __ATOMIC_RELAXED);
+        if (FS.sh_on[rs]) hold_go(rs, rq & 0xffu, fc, ln, rpf, gap);          /* a DELETE+pad hold is open on that side: join it, no second SHIFT edge */
+        else { FS.rp[rs] = (uint8_t)(rq & 0xffu); FS.rp_t0[rs] = (uint8_t)hb; }
+    }
     const uint32_t emp = __atomic_load_n(&FS.emp, __ATOMIC_RELAXED);
     for (int s = 0; s < 2; s++) {
         unsigned c = (cur >> (14 * s)) & 0x3fffu, r = (rise >> (14 * s)) & 0x3fffu;
@@ -1024,6 +1055,7 @@ static inline __attribute__((always_inline)) void erp_work(unsigned char *frame,
         }
         const unsigned char shm = (unsigned char)(1u << SO[s].sh_b);
         const int sh = (c & 1u) != 0, dl = (c & 4u) != 0;
+        if (FS.sh_on[s] && (stall || !do_pad)) hold_drop(s, fc);   /* 0.2.15: a bus stall (the real buttons are unknown) or hot cue pads off: release SHIFT now */
         if (do_pad) {
             /* DELETE hold state, kept until DELETE itself is released (0.2.8 al028c: it used to be cleared when
              * SHIFT joined, so SHIFT+DELETE, SHIFT up, DELETE up made a tap = a stray memory-cue delete).
@@ -1038,7 +1070,7 @@ static inline __attribute__((always_inline)) void erp_work(unsigned char *frame,
                 if (stall && FS.dh[s]) FS.du[s] |= 2;
                 if ((f & 4u) && FS.dh[s] && FS.du[s] == 2 && !sh)    /* alone, but frames were missing: do NOT guess a tap */
                     __atomic_store_n(&FS.tapx, FS.tapx + 1, __ATOMIC_RELAXED);
-                if ((f & 4u) && FS.dh[s] && !FS.du[s] && !sh) {      /* released, alone: replay a tap */
+                if ((f & 4u) && FS.dh[s] && !FS.du[s] && !sh && !FS.sh_on[s]) {   /* released, alone: replay a tap (0.2.15: not while our SHIFT is still down: SHIFT+DELETE would clear) */
                     FS.tap = ((FS.tap & 0xffff0000u) + 0x10000u) | ((uint32_t)s << 8) | (uint8_t)(hb - FS.dh_t0[s]);
                     FS.rp[2 + s] = 1; FS.dh_t0[s] = (uint8_t)hb;
                     NIB_INC(sn, base + 12);                            /* PRESS, for the deleteCue event */
@@ -1071,20 +1103,29 @@ static inline __attribute__((always_inline)) void erp_work(unsigned char *frame,
             const unsigned go = padr & ~pe;              /* non-empty pads that went down now */
             if (go) {
                 pe |= go;
-                FS.rp[s] = (uint8_t)(FS.rp[s] | go); FS.rp_t0[s] = (uint8_t)hb;
+                hold_go(s, go, fc, ln, rpf, gap);            /* 0.2.15: opens the one SHIFT hold of this DELETE hold, or joins the open one */
                 FS.dlp = ((FS.dlp & 0xffff0000u) + 0x10000u) | ((uint32_t)s << 8) | (uint32_t)(__builtin_ctz(go) + 1);
             }
             frame[SO[s].pad_o] &= (unsigned char)~pe;
         } else if (do_pad) frame[SO[s].pad_o] &= (unsigned char)~pe;
         if (do_pad) { pe &= (c >> 6) & 0xffu; FS.pe[s] = (uint8_t)pe; }
-        if (FS.rp[s]) {
+        if (FS.rp[s] || FS.sh_on[s]) {
             /* a plain pad that goes down while OUR SHIFT is up would reach stock as SHIFT+pad (= a hot cue DELETE): hold it back until the
              * replay window is over, then it passes as the plain press it is (level based: a finger still on it gives the press, late). */
             unsigned hd = FS.hd[s] | (padr & ~pe);
             FS.hd[s] = (uint8_t)hd;
             frame[SO[s].pad_o] &= (unsigned char)~hd;
         } else FS.hd[s] = 0;
-        if (FS.rp[s]) {
+        if (FS.sh_on[s]) {
+            /* 0.2.15 the SHIFT hold of DELETE+pad: SHIFT from sh_t0 until released; the pads only once SHIFT has led by `ln` frames, each press
+             * for rpf frames (pad_end); released when DELETE is up, no pad is in flight and SHIFT has been down for gap frames (300 ms) */
+            if (FS.rp[s] && (int32_t)(fc - FS.pad_end[s]) >= 0) FS.rp[s] = 0;
+            if (!dl && !FS.rp[s] && (int32_t)(fc - (FS.sh_t0[s] + gap)) >= 0) { FS.sh_on[s] = 0; FS.sh_up[s] = fc; }
+            else {
+                if ((int32_t)(fc - FS.sh_t0[s]) >= 0) frame[SO[s].sh_o] |= shm;
+                if (FS.rp[s] && (int32_t)(fc - (FS.sh_t0[s] + ln)) >= 0) frame[SO[s].pad_o] |= FS.rp[s];
+            }
+        } else if (FS.rp[s]) {
             /* SHIFT+pad replay (the tick's request for a point cue, and DELETE+pad above): SHIFT for the whole window, the pad
              * only from `ln` frames in, so stock always sees SHIFT well before the pad, as with a hand (0.2.13: it used to be
              * one frame, ~1 ms on the deck). The window is rpf + ln frames, at most 250 (8-bit heartbeat). */
@@ -1185,6 +1226,7 @@ static void prewarm_filter(void)
     FS.rp_frames = 12; FS.lead_frames = 1; memset(FS.rp, 0, sizeof FS.rp); memset(FS.rp_t0, 0, sizeof FS.rp_t0); memset(FS.dh, 0, sizeof FS.dh);
     memset(FS.du, 0, sizeof FS.du); memset(FS.dh_t0, 0, sizeof FS.dh_t0); memset(FS.hd, 0, sizeof FS.hd);
     FS.req = 0;
+    FS.fc = 0; FS.gap_frames = 1; memset(FS.sh_on, 0, sizeof FS.sh_on); memset(FS.sh_t0, 0, sizeof FS.sh_t0); memset(FS.sh_up, 0, sizeof FS.sh_up); memset(FS.pad_end, 0, sizeof FS.pad_end);
 }
 
 /* ---- 0.2.8: keep our own code resident ----
@@ -1574,7 +1616,7 @@ static void ready_flush(void)
         for (int k = 0; k < 3; k++)
             if (ready_tick[d][k] && tick_no >= ready_tick[d][k]) {
                 ready_tick[d][k] = 0;
-                if (1) LOGC("ready (log only, 0.2.14): %s", TXT[d]); else ready_tick[d][k] = tick_no + 30;
+                if (!toast_pending && !(ts_shown && ts_ready_deck < 0)) do_toast_ms(TXT[d], 2500, d); else ready_tick[d][k] = tick_no + 30;
                 return;
             }
 }
@@ -1977,9 +2019,8 @@ static void toastf(const char *fmt, const char *a)
     static char ring_txt[8][112]; static int k;
     char *b = ring_txt[k++ & 7];
     snprintf(b, 112, fmt, a);
-    do_toast(b);
+    do_toast_ms(b, 1500, -1);
 }
-static void toastf_chg(const char *fmt, const char *a) { toast_change = 1; toastf(fmt, a); toast_change = 0; }
 static int request(int d, int op, const void *cue, const char *why)
 {
     uint32_t cur = __atomic_load_n(&pend_op[d], __ATOMIC_ACQUIRE);
@@ -2241,7 +2282,7 @@ static int clear_active(int d, const char *why)
 static void apply_clear(int d)
 {
     if (!holder_of(d)) { LOG("clear abort: deck %d not bound", d + 1); do_toast("Active Loop: deck not ready"); return; }
-    if (clear_active(d, "clear") == 0) do_toast_chg("Active Loop cleared");
+    if (clear_active(d, "clear") == 0) do_toast("Active Loop cleared");
 }
 
 /* ---- 0.2.9: ACTIVE LOOP PERSISTENCE ----
@@ -2566,7 +2607,7 @@ static void hot_gone_active(int d, int k)
     if (!holder_of(d)) { fw_cue_dtor(act_buf[d]); act_ok[d] = 0; active_cid[d] = 0; spent[d] = 0; }
     else if (clear_active(d, "hot cue deleted") != 0) return;
     LOG("deck %d: the armed loop (hot cue %d) was deleted -> Active Loop cleared", d + 1, k);
-    do_toast_chg("Active Loop cleared (loop deleted)");
+    do_toast("Active Loop cleared (loop deleted)");
 }
 /* Compare each cached hot cue loop with its live slot. The slot read is a tick job. */
 static long hot_chk[NDECK];
@@ -2626,7 +2667,7 @@ static void mem_gone(int d, int i)
         if (!holder_of(d)) { fw_cue_dtor(act_buf[d]); act_ok[d] = 0; active_cid[d] = 0; spent[d] = 0; }
         else if (clear_active(d, "memory cue deleted") != 0) return;
         LOG("deck %d: the armed loop (memory #%d) was deleted -> Active Loop cleared", d + 1, i);
-        do_toast_chg("Active Loop cleared (loop deleted)");
+        do_toast("Active Loop cleared (loop deleted)");
     }
 }
 static void on_delete_ev(ev_t *e)
@@ -2802,14 +2843,14 @@ static void al_off(int d, int kind)
     int pc = persist_clear(d, c);
     if (pc == PC_FAIL) {
         LOG("deck %d: SHIFT+pad on the armed pad (hot cue %d at %s): saved copy cannot be removed now, Active Loop stays on", d + 1, kind, t);
-        do_toast_chg("Active Loop stays on: saved copy not removable now (press MEMORY once, try again)");
+        do_toast("Active Loop stays on: saved copy not removable now (press MEMORY once, try again)");
         return;
     }
     if (act_ok[d] && clear_active(d, "SHIFT+pad toggle off") != 0) return;     /* busy: press again */
     LOG("deck %d: SHIFT+pad on the armed pad (hot cue %d at %s): Active Loop off%s", d + 1, kind, t,
         pc == PC_DONE ? ", saved flag removed" : pc == PC_KEPT ? ", the saved flag of another loop stays" : " (nothing saved for it)");
-    if (pc == PC_KEPT) toastf_chg("Active Loop off at %s (its saved flag stays in the track)", t);
-    else toastf_chg("Active Loop off: hot cue at %s", t);
+    if (pc == PC_KEPT) toastf("Active Loop off at %s (its saved flag stays in the track)", t);
+    else toastf("Active Loop off: hot cue at %s", t);
 }
 static void apply_pad(int s, int d, int kind)
 {
@@ -2826,7 +2867,7 @@ static void apply_pad(int s, int d, int kind)
         if (pr != 0) return;
         char t[32]; fmt_time(t, sizeof t, cue_in(hot_buf[d][kind]));
         int ps = persist_set(d, hot_buf[d][kind]);
-        toastf_chg(ps == PS_OK ? "Active Loop saved: hot cue at %s" :
+        toastf(ps == PS_OK ? "Active Loop saved: hot cue at %s" :
                ps == PS_HAVE ? "Active Loop armed at %s (already saved)" :
                ps == PS_NOSTORE ? "Active Loop armed at %s (not saved yet)" :
                ps == PS_FULL ? "Active Loop armed at %s, NOT saved: memory list full" :
@@ -3159,7 +3200,7 @@ static void pv_report(int d, const anlz_res_t *r)
         } else if (hit == 0) {
             LOG("deck %d: the firmware did not store the flagged copy at %s: forgotten, nothing will be deleted", d + 1, t);
             mem_drop(d, i);
-            do_toast_chg("Active Loop: NOT saved (the firmware did not store it)");
+            do_toast("Active Loop: NOT saved (the firmware did not store it)");
         } else {
             mem_mine[d][i] = OWN_NONE;
             LOG("deck %d: not sure the flagged loop at %s is our copy (%d flagged, %d memory loops, expected %d): the mod will not delete it", d + 1, t, fl, mem, pv_pre[d]);
@@ -3483,7 +3524,7 @@ static void poll_filter(void)
             LOG("frame filter is not running (no ERP frames for ~3 s): SHIFT+MEMORY / SHIFT+DELETE off "
                 "until EP147 restarts; SHIFT+pad / DELETE+pad are stock again (SHIFT+pad deletes a hot cue, a loop too); "
                 "auto-arm, engage and Auto-advance still on");
-            do_toast_chg("Active Loop on; SHIFT combos off until restart");
+            do_toast("Active Loop on; SHIFT combos off until restart");
         }
     } else {
         if (filter_dead) { filter_dead = 0; LOG("frame filter running again"); }
@@ -3501,6 +3542,9 @@ static void poll_filter(void)
             if (n != FS.rp_frames) __atomic_store_n(&FS.rp_frames, n, __ATOMIC_RELAXED);
             uint32_t ln = rate_lead(fi, cnt_hz, lead_ms);
             if (ln != FS.lead_frames) __atomic_store_n(&FS.lead_frames, ln, __ATOMIC_RELAXED);
+            uint64_t gf = ((uint64_t)cnt_hz * GAP_MS / 1000u + fi / 2u) / fi;      /* 300 ms in frames */
+            if (gf < 1) gf = 1; else if (gf > 4000u) gf = 4000u;
+            if ((uint32_t)gf != FS.gap_frames) __atomic_store_n(&FS.gap_frames, (uint32_t)gf, __ATOMIC_RELAXED);
             if ((cfg & CFG_ENABLE) && (!fr_logged || fps < fr_last * 0.9 || fps > fr_last * 1.1)) {
                 double lim = 3.0 * fi; if (lim < (double)FS.gthr) lim = (double)FS.gthr;
                 LOG("ERP frame rate %.0f/s (typical interval %.1f ms): SHIFT+pad / DELETE replay = %u frames (40 ms), SHIFT leads a synthesized SHIFT+pad by %u frames (%u ms), a stall = a gap over %.1f ms (3x the interval)",
@@ -3523,8 +3567,7 @@ static void poll_filter(void)
         if (dlp_wait_ns && !dlp_got && now_ns() - dlp_wait_ns > 800000000ull) {
             dlp_wait_ns = 0;
             if (cfg & CFG_ENABLE) {
-                if (lead_ms < LEAD_MS_MAX) lead_ms *= 2;
-                LOG("DELETE+pad: no hot cue delete followed within 0.8 s (empty pad, or stock did not take SHIFT+pad): SHIFT now leads by %u ms", lead_ms);
+                LOG("DELETE+pad: no hot cue delete followed within 0.8 s (empty pad, or stock did not take SHIFT+pad); SHIFT lead stays %u ms (0.2.15: no escalation)", lead_ms);
             }
         } else if (dlp_got) dlp_wait_ns = 0;
         static uint32_t dle_seen;
@@ -3838,7 +3881,7 @@ static int init(const az_core_v1 *core)
         const az_row_v1 po = {
             .size = sizeof po, .key = "popups", .label = "Pop-up messages",
             .kind = AZ_ROW_TOGGLE, .flags = AZ_ROW_DEFAULT_ON, .parent = "enable",
-            .help = "Show a message once when a loop is saved, turned off or deleted. Off: no pop-ups (the pad shows the state).",
+            .help = "Show text pop-ups (loop saved, off, cleared, ready ...). Off: no pop-ups; the pads still show the state.",
             .on_change = row_changed, .user = (void *)"Pop-up messages",
         };
         h_popups = C->register_row(MOD_ID, &po);
@@ -3880,7 +3923,7 @@ static int init(const az_core_v1 *core)
     tk_row_was = row_on();       /* 0.2.8: a start with the row off is silent; only a toggle is logged */
     memset(ring, 0, sizeof ring);                 /* pre-touch: no first-use page fault in a hook */
     __atomic_store_n(&al_live, 1, __ATOMIC_RELEASE);
-    LOG("loaded 0.2.13; filter: SHIFT+MEMORY/DELETE, SHIFT+pad arm+save when nothing of yours is lost (second press off), red pad, DELETE+pad (+ our own saved copy); deleteCue observer; template-free ANLZ build, flags at parse, wait-free filter/hot path, updatable toast (%s); setout=%d",
+    LOG("loaded 0.2.15; filter: SHIFT+MEMORY/DELETE, SHIFT+pad arm+save when nothing of yours is lost (second press off), red pad, DELETE+pad (+ our own saved copy); deleteCue observer; template-free ANLZ build, flags at parse, wait-free filter/hot path, updatable toast (%s); setout=%d",
         tsurf ? "surface" : "banner queue", orig_setout != NULL);
     return 0;
 }

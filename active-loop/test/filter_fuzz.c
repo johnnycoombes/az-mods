@@ -39,6 +39,7 @@ int main(int argc, char **argv)
     unsigned eaten[2] = {0}, empm[2] = {0};
     unsigned char pp[2] = {0}, ps[2] = {0};
     long rp = 0;
+    long gapf = 1, shfall[2] = {-1000000, -1000000}, quiet[2] = {0, 0}, gap_bad = 0, stuck_bad = 0, tap_held = 0; unsigned char sho_prev[2] = {0, 0};
     for (long fr = -200; fr < nfr; fr++) {
         int warm = fr < 0;
         int s = rnd() & 1;
@@ -61,6 +62,7 @@ int main(int argc, char **argv)
             if (FS.rp_frames < want || FS.rp_frames > (want * 125 + 99) / 100 + 1) { rp_bad++; printf("rp_frames %u want %u\n", FS.rp_frames, want); }
             rp = FS.rp_frames;
             FS.lead_frames = rate_lead(fi, cnt_hz, LEAD_MS_MIN);           /* 0.2.13: the tick's lead, 40 ms in frames */
+            gapf = (long)((uint64_t)cnt_hz * GAP_MS / 1000u / fi); FS.gap_frames = (uint32_t)gapf;   /* 0.2.15: 300 ms in frames */
             { double ms = FS.lead_frames * (double)P / 1e6;                  /* >= 1 frame; at the deck rate it must really be ~40 ms */
               if (FS.lead_frames < 1 || (fps >= 125 && (ms < 35.0 || ms > 50.0))) { rp_bad++; printf("lead_frames %u = %.1f ms at %d fps\n", FS.lead_frames, ms, fps); } }
         }
@@ -72,6 +74,7 @@ int main(int argc, char **argv)
         }
         unsigned in_pad[2] = { (unsigned)ipad[0], (unsigned)ipad[1] };
         unsigned mask_now = FS.emp;
+        int sh_before[2] = { FS.sh_on[0], FS.sh_on[1] };
         on_erp(0, F, ERP_LEN, 0); frames++;
         for (int k = 0; k < 2; k++) {
             /* model: DELETE hold */
@@ -96,12 +99,21 @@ int main(int argc, char **argv)
             if (np & eaten[k] & ~(unsigned)FS.rp[k]) {   /* a bit the SHIFT+pad replay is driving is not a leak */ eat_bad++; if (eat_bad < 5) printf("eaten pad leaked: frame %ld side %d out %02x eaten %02x ish=%d idl=%d\n", fr, k, np, eaten[k], ish[k], idl[k]); }
             pp[k] = np; ps[k] = (unsigned char)so;
             if (out && !(fr <= tapend[k])) { bad++; if (bad < 8) printf("bad: frame %ld side %d idl=%d ish=%d ipad=%d dpad=%d dsh=%d dstall=%d\n", fr, k, idl[k], ish[k], ipad[k], dpad[k], dsh[k], dstall[k]); }
-            if (expect_tap && !out) { tapmiss++; if (tapmiss < 8) printf("tap not started: frame %ld side %d\n", fr, k); }
+            /* 0.2.15: the synthetic SHIFT never comes down again within 300 ms of its last release, and is never left down */
+            if (!ish[k] && !prevsh[k]) {
+                if (so && !sho_prev[k] && fr - shfall[k] < gapf - 1) { gap_bad++; if (gap_bad < 5) printf("SHIFT down again %ld frames after its release (gap %ld) frame %ld side %d\n", fr - shfall[k], gapf, fr, k); }
+                if (!so && sho_prev[k]) shfall[k] = fr;
+                quiet[k] = (!idl[k] && !ipad[k] && !stall) ? quiet[k] + 1 : 0;
+                if (quiet[k] > 2 * gapf + (long)rp + 60 && so) { stuck_bad++; if (stuck_bad < 5) printf("SHIFT stuck down with everything up: frame %ld side %d\n", fr, k); }
+            } else quiet[k] = 0;
+            sho_prev[k] = (unsigned char)so;
+            if (expect_tap && !out && sh_before[k]) { tap_held++; }       /* 0.2.15: our SHIFT is still down: a DELETE tap now would be SHIFT+DELETE, so it is not replayed */
+            else if (expect_tap && !out) { tapmiss++; if (tapmiss < 8) printf("tap not started: frame %ld side %d\n", fr, k); }
             if (dstall[k] && released && out && fr > tapend[k]) { tapmiss++; }
             prevdl[k] = idl[k]; prevsh[k] = ish[k]; prevpad[k] = (int)in_pad[k];
         }
     }
-    printf("fps %d: frames %ld taps %ld stalls %ld stalled-holds %ld swallowed %ld | bad %ld lead_bad %ld lead_short %ld eaten_bad %ld tapmiss %ld fi_bad %ld rp_bad %ld\n",
-           fps, frames, taps, stalls, tapstall, swallowed, bad, lead_bad, lead_short, eat_bad, tapmiss, fi_bad, rp_bad);
-    return (bad || lead_bad || lead_short || eat_bad || tapmiss || fi_bad || rp_bad || !taps || !stalls || !tapstall) ? 1 : 0;
+    printf("fps %d: frames %ld taps %ld stalls %ld stalled-holds %ld swallowed %ld | bad %ld lead_bad %ld lead_short %ld eaten_bad %ld tapmiss %ld fi_bad %ld rp_bad %ld | gap_bad %ld stuck_bad %ld taps held back by our SHIFT %ld\n",
+           fps, frames, taps, stalls, tapstall, swallowed, bad, lead_bad, lead_short, eat_bad, tapmiss, fi_bad, rp_bad, gap_bad, stuck_bad, tap_held);
+    return (bad || lead_bad || lead_short || eat_bad || tapmiss || fi_bad || rp_bad || gap_bad || stuck_bad || !taps || !stalls || !tapstall) ? 1 : 0;
 }
