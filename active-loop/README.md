@@ -11,14 +11,30 @@ Community mod for AZ-MODS on the Pioneer XDJ-AZ (EP147 2.00 / 2.01).
 | **SHIFT + pad** on a hot cue that holds a **loop**, first press | Arm that loop as the Active Loop and, **when no loop of yours would be lost**, save it (0.2.9/0.2.10): the pad turns **red** and a memory loop with the Active Loop flag is stored by the deck's own software. The pad press is eaten, so the stock delete does **not** run; the strip says *Active Loop saved: hot cue at ...*, or why it only armed it (see 0.2.10). |
 | **SHIFT + the armed pad** again | Active Loop **off**: it is cleared. A saved copy **this mod made and confirmed** is deleted; a saved flag on any other loop **stays** (the strip says so). The normal hot cue loop stays. |
 | **SHIFT + pad** on a hot cue that is a **point** | Passed to stock (replayed for 40 ms): the point cue is deleted, as without the mod. |
-| **DELETE + pad** (hold DELETE, press the pad) | Delete that hot cue, loop or point. The mod sends the pad to stock as SHIFT+pad (0.2.13: SHIFT first, 40 ms ahead, then the pad for 40 ms). If it was the Active Loop, the Active Loop is cleared, and a saved copy this mod made and confirmed is deleted with it (any other memory loop stays). |
-| **DELETE** alone (tap) | Stock DELETE (memory cue), replayed a few milliseconds late when you release it. Deleting the memory loop that is the Active Loop clears the Active Loop too. |
+| **DELETE + pad** (hold DELETE, press the pad) | Delete that hot cue, loop or point. The mod sends the pad to stock as SHIFT+pad (0.2.15: one SHIFT hold for the whole DELETE hold: it goes down 40 ms before the first pad, stays down for every pad you delete in that hold, and comes up once when you release DELETE). If it was the Active Loop, the Active Loop is cleared, and a saved copy this mod made and confirmed is deleted with it (any other memory loop stays). |
+| **DELETE** alone (tap) | Stock DELETE (memory cue), replayed a few milliseconds late when you release it (0.2.15: not replayed within 0.3 s of a DELETE+pad, see below). Deleting the memory loop that is the Active Loop clears the Active Loop too. |
 | **SHIFT + pad** in sampler, keyboard or any other pad mode | The mod treats the pad as a hot cue pad. A pad that is not a loop is replayed to stock, so it still does what stock does; only a pad that holds a hot cue **loop** is armed instead. Since al028d a pad whose hot cue slot is **empty** is swallowed (SHIFT+pad and DELETE+pad) unless the core reports BEAT LOOP or SLIP LOOP mode; the core cannot tell sampler, keyboard, HOT CUE and BEAT JUMP apart, so there SHIFT+empty pad does nothing. |
 | Mod row off, or the core has switched the frame filter off | Everything above is stock. **SHIFT+pad then deletes a hot cue, a loop too**, as it always did. |
 
 SHIFT+CALL is not used by the mod. (Earlier notes said stock doubles/halves the loop with it. Correction: stock CALL picks double or half from the loop state, not from SHIFT.)
 
+## 0.2.15 - one SHIFT per DELETE hold, and pop-ups can be switched off
+
+**Stuck SHIFT fixed.** On the deck, deleting a pad with DELETE+pad could leave it in SHIFT mode (the jog wheel scrolled fast until SHIFT was pressed again). The mod sent stock one short SHIFT tap *per pad*, 60 ms apart when you delete several pads in one DELETE hold, and the deck can read two quick SHIFT taps as a SHIFT lock. Now:
+
+- the mod's SHIFT goes down **once**, 40 ms before the first pad (a fixed lead, no longer lengthened after a miss), stays down across **every** pad in that hold, and comes up **once**, when you release DELETE;
+- it is never down for less than **0.3 s**, and a new hold never starts within **0.3 s** of the last release (the pad you press then waits for it and is not leaked to the deck);
+- a bus stall, or switching the mod off, releases it at once.
+
+**One side effect:** a plain **DELETE tap within 0.3 s of a DELETE+pad is not passed on** to the deck (the mod's SHIFT is still down, and stock would read it as SHIFT+DELETE). Tap DELETE again after a moment.
+
+**Pop-up messages** (new Mod Menu row, under Active Loop, default **on**). Off: no text pop-ups at all; the pads (and the pulsing armed pad) still show the state. This replaces the 0.2.14 pop-up rework: **0.2.15 shows the same pop-ups as 0.2.13**, with the on/off row added (the "once per change" filtering and log-only notices described under 0.2.14 are not part of 0.2.15).
+
+Everything else is as in 0.2.13: SHIFT+pad arm/save, the safety rules and the pad colours.
+
 ## 0.2.14 - fewer pop-ups
+
+*(Superseded in 0.2.15: only the Pop-up messages row was kept; see above.)*
 
 0.2.13 and earlier showed a pop-up for almost everything. Now a pop-up appears **only when the track's loops change**, and then **once**:
 
