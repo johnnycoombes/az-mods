@@ -18,6 +18,26 @@ Community mod for AZ-MODS on the Pioneer XDJ-AZ (EP147 2.00 / 2.01).
 
 SHIFT+CALL is not used by the mod. (Earlier notes said stock doubles/halves the loop with it. Correction: stock CALL picks double or half from the loop state, not from SHIFT.)
 
+## 0.2.16 - the overview marker can pulse, on all four decks
+
+**Pulse overview marker** (Mod Menu, default **off**, no key combo; grayed while Active Loop is off). On: the track-overview marker at the current Active Memory or Cue Loop breathes red (4 s). The jog screen does not flash. Off: the marker stays solid, and it still moves with the picker.
+
+- At load, a rekordbox ACTIVE Memory loop's marker pulses.
+- **SHIFT+pad** on a Cue Loop moves the marker there. The old position stops pulsing.
+- **SHIFT+that pad again** hides the marker.
+- **SHIFT+DELETE** still clears the picker and leaves the saved rekordbox loop as the fallback.
+- On a normal exit, with **Auto-advance** on, the marker moves to the next loop ahead (flagged memory first, then any stored loop ahead). The playhead does not jump.
+- No loop ahead, or Auto-advance off: the marker hides. A loop already behind the playhead is not brought back.
+- A rekordbox memory loop this mod did not store is not rewritten to move its flag. The choice lasts for this load; reloading the track restores the rekordbox flag.
+
+**Decks 1–4.** Pulse slots cover all four decks and both overview trees (SOURCE and WAVEFORM). Deck identity is read from the bar each time, not cached. Switching layers (1/3 and 2/4) puts the old layer's marker back to solid before the new deck's marker pulses.
+
+Gate lines (`overview-pulse: gate ...`) are written only while this row is on and AZ-MODS per-mod logging is enabled. They record decisions when those change. They are not a rate or performance measurement.
+
+**Caveat.** Moving between SOURCE and WAVEFORM, the pulse can take about 1–2 seconds to follow. That timing is from an earlier emulator run. It was not measured again on the deck for 0.2.16, and this revision has no new emulator run.
+
+**What was checked.** Host `test/ovp_gate_test.c` passed gcc -O1 and gcc ASan+UBSan (the pulse gate, placement, exit and four-deck rebinding on the host, not on the deck). The SDK container package of this source validated (`azmod-pack validate`). On the deck, the flagged marker, a SHIFT+pad move, and the return on exit were watched, and on 7 Nov 2026 decks 3 and 4 flashed after a layer switch. The USB loader log for that bundle (388 bytes) only shows version 0.2.16 loaded, the packaged `.so` allowed, and all 8 hooks claimed; `azmod-crash.log` was empty and per-mod logging was off, so that log has no gate lines and it is not a runtime-performance result. Firmware stays **2.00/2.01 only** (`ep147-9e9454e357389ece`). The published package is that container build, unchanged: 176750 bytes, sha256 `d893fa5d169b40f9e2a91b8c16077e8908302b2865f9a64b153e59553b7e42c2`.
+
 ## 0.2.15 - one SHIFT per DELETE hold, and pop-ups can be switched off
 
 **Stuck SHIFT fixed.** On the deck, deleting a pad with DELETE+pad could leave it in SHIFT mode (the jog wheel scrolled fast until SHIFT was pressed again). The mod sent stock one short SHIFT tap *per pad*, 60 ms apart when you delete several pads in one DELETE hold, and the deck can read two quick SHIFT taps as a SHIFT lock. Now:

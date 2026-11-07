@@ -1,7 +1,28 @@
 /* SPDX-License-Identifier: GPL-3.0-only
  *
- * active-loop 0.2.15 — Active Loop Picker for EP147 (XDJ-AZ 2.00/2.01).
+ * active-loop 0.2.16 — Active Loop Picker for EP147 (XDJ-AZ 2.00/2.01).
  *
+ * 0.2.16: overview Active Loop marker pulse (ActiveLoopBar::Bar). New Mod Menu row
+ *         "Pulse overview marker" (default OFF, top-level; grayed while Active Loop is off).
+ *         Hooks Bar::paint (0x1d6c8a8) and ActiveLoopBar::update (0x1d6c380). Deck id comes
+ *         from the PlayerInfoState block behind +0x50/+0x58 (al0216c: via=perdeck+modeobj even
+ *         with identical loops on both decks). Unknown bars (deck=?) are never recoloured.
+ *         When the row is on, a <=10 Hz mutate pass writes a 4 s breathing red into Bar+0x30
+ *         for the on-screen bar of each deck whose overview marker is the CURRENT
+ *         ACTIVE loop: a SHIFT+pad / SHIFT+MEMORY pick (even when persist_set does not
+ *         move a foreign rekordbox flag), else the stored flag (mem_flag / CueProperty+0xe1
+ *         / PCPT status 4). Auto-advance follows the live armed target (Memory or Cue).
+ *         Terminal exit hides the marker; SHIFT+pad again (toggle off) hides it; SHIFT+DELETE falls back
+ *         to the stored flag. Not gated on picker arm for the load-time flag. Menu only —
+ *         no key combo for the pulse. live =
+ *         ActiveLoopBar with the newest update within 0.5 s (al0216b/i: on-screen ~23-54
+ *         calls/s, hidden calls=0);
+ *         organic Bar::paint only breaks ties. Then juce::Component::repaint at Bar+0x38
+ *         (0x25f5a10), hard-capped at 100 ms/Bar; deferred paints are non-organic for
+ *         150 ms/Bar (no self-feed). The first mutate/log burst is deferred a tick or two
+ *         after the row turns on so the menu tap does not share that work. view= from width
+ *         is log-only and never gates a colour write. No ANLZ or stick writes. A refused
+ *         hook only disables this probe; 0.2.15 behaviour stays.
  * 0.2.15: (1) DELETE+pad no longer taps SHIFT once per pad. The synthetic SHIFT of a DELETE+pad is ONE hold per DELETE hold: it goes down once,
  *         40 ms (fixed lead, the 0.2.13 escalation 40/80/160 ms is gone) before the first pad, stays down across every pad of the hold,
  *         and comes up once, when DELETE is up, no pad press is still being replayed and it has been down for 300 ms. A new hold never starts
@@ -301,6 +322,42 @@
 #define DELETE_INS0  0xd10c43ffu
 #define DELETE_INS1  0x2a0103e3u
 
+/* 0.2.16: overview Active Loop marker (EP147 2.00/2.01). See EP147-ACTIVELOOP-BAR.md.
+ * Both paint and update start with the same four instructions (stp/mov/stp/mov); claim_hook OK. */
+#define VA_BAR_PAINT   ((uintptr_t)0x1d6c8a8u)  /* gui::player_info_waveform::ActiveLoopBar::Bar::paint */
+#define VA_ALB_UPDATE  ((uintptr_t)0x1d6c380u)  /* gui::player_info_waveform::ActiveLoopBar::update */
+#define VA_REPAINT     ((uintptr_t)0x25f5a10u)  /* juce::Component::repaint() (no-arg); not claimed in 0.2.16 */
+#define OVP_PROLOG0    0xa9bd7bfdu              /* stp x29, x30, [sp, #-0x30]! */
+#define OVP_PROLOG1    0x910003fdu              /* mov x29, sp */
+#define OVP_PROLOG2    0xa90153f3u              /* stp x19, x20, [sp, #0x10] */
+#define OVP_PROLOG3    0xaa0003f3u              /* mov x19, x0 */
+#define BAR_COLOUR_OFF     0x30u                /* juce::Colour dword on Bar (paint reads this) */
+#define BAR_COMPONENT_OFF  0x38u                /* juce Component subobject; bounds at +0x28 of this */
+#define ALB_BAR_OFF        0x68u                /* Bar embedded in ActiveLoopBar */
+#define ALB_COLOUR_OFF     0x98u                /* == ALB_BAR_OFF + BAR_COLOUR_OFF */
+#define ALB_P50_OFF        0x50u                /* ctor x2: address of shared_ptr at per-deck+0x1050 */
+#define ALB_P58_OFF        0x58u                /* ctor x3: address of shared_ptr at per-deck+0x10f0 */
+#define ALB_P60_OFF        0x60u                /* ctor x4: *(per-deck+0x1040)+0x10 (player slot) */
+#define ALB_WIDTH_OFF      0x40u                /* overview width in px; update() ldr w2,[x19,#0x40] */
+#define ALB_ORIGIN_OFF     0x48u                /* overview origin in px; update() ldr w0,[x19,#0x48] */
+#define ALB_LOOP_IN_OFF    0xe0u                /* hide-check at **(ALB+0x58)+0xe0 (sentinel = INT64_MAX) */
+#define ALB_LOOP_OUT_OFF   0xe8u                /* hide-check / X denominator at **(ALB+0x58)+0xe8 */
+#define BAR_X_OFF          0x34u                /* cached X; update writes this before 0x260d120 */
+#define VA_BAR_MOVE        ((uintptr_t)0x260d120u) /* Component setTopLeft-style; not claimed */
+#define COMP_PARENT_OFF    0x70u                /* juce Component parent; repaint 0x25f31e0 walks this */
+#define PIS_SP50           0x1050u              /* interior offset of ALB+0x50 inside the per-deck block */
+#define PIS_SP58           0x10f0u              /* interior offset of ALB+0x58 inside the per-deck block */
+#define PISCTRL_VT         ((uintptr_t)0x2defe68u) /* _Sp_counted_ptr_inplace<gui::PlayerInfoState> */
+#define PISCTRL_OFF        0x10u
+#define PERDECK_STRIDE     0x1400u
+#define PERDECK_MODEOBJ    0x10b0u
+#define PERDECK_TILEDS     0x1160u
+#define VT_BAR             ((uintptr_t)0x2f0d708u)
+#define VT_ALB             ((uintptr_t)0x2f0e3a8u)
+#ifndef AL_OVERVIEW_PULSE_MUTATE
+#define AL_OVERVIEW_PULSE_MUTATE 1              /* 0.2.16: gated colour + Component::repaint after al0216c */
+#endif
+
 #define CUE_SIZE     256
 #define NDECK        4
 #define NHOT         9      /* kinds 1..8 */
@@ -550,9 +607,10 @@ static int h_autoadv = -1, h_rearm = -1;
 static int h_enable = -1;
 static int h_popups = -1;                   /* 0.2.15: Mod Menu row "Pop-up messages" */
 static int h_pulse = -1;                    /* 0.2.11: Mod Menu row "Pulse armed pad" */
+static int h_ovpulse = -1;                  /* 0.2.16: Mod Menu row "Pulse overview marker" (default off) */
 static uint32_t cfg_bits = (1u) | (0u << 1) | (1u << 3) | (1u << 4) | (1u << 5);
 enum { CFG_ENABLE = 1u << 0, CFG_HOTCUE = 1u << 3, CFG_CLEAR = 1u << 4, CFG_TOAST = 1u << 5,
-       CFG_AUTOADV = 1u << 6, CFG_REARM = 1u << 7, CFG_PULSE = 1u << 8 };
+       CFG_AUTOADV = 1u << 6, CFG_REARM = 1u << 7, CFG_PULSE = 1u << 8, CFG_OVPULSE = 1u << 9 };
 static int cfg_combo_val(uint32_t b) { return (int)((b >> 1) & 3u); }
 
 enum { COMBO_SHIFT_MEMORY = 0, COMBO_OFF_PADS = 1, COMBO_PAD_ONLY = 2, NCOMBO = 3 };
@@ -2220,6 +2278,37 @@ static int count_known(int d, int64_t after)
     return n;
 }
 static int pick_quiet;   /* 0.2.8: caller toasts itself */
+/* Overview marker follow (deck test 2026-11-06):
+ * persist_set will not store a new CueProperty+0xe1 while a rekordbox flagged
+ * memory loop exists (PS_FOREIGN: firmware would delete that loop). SHIFT+pad
+ * therefore only arms the picker, and stock ActiveLoopBar stays on the old
+ * flag (ActiveLoopUpdater 0x9a2e40 scans MemoryCueSet; update() places X from
+ * player+0x510 / **(ALB+0x58)+0xe8). Session state lets the hook reposition
+ * (or hide) the bar to follow the CURRENT Active without writing the stick:
+ *   STOCK   — no user pick this load; stock/flag placement
+ *   PICKED  — SHIFT+pad / SHIFT+MEMORY / auto-advance; follow the live armed target
+ *   CLEARED — SHIFT+pad toggle-off or terminal exit; hide, do not revive a past flag
+ * SHIFT+DELETE clears the picker only: PICKED + !armed falls back to the flag. */
+enum { OVP_SESS_STOCK = 0, OVP_SESS_PICKED = 1, OVP_SESS_CLEARED = 2 };
+static uint8_t  ovp_sess[NDECK];
+static uint32_t ovp_place_needed;   /* count of decks not STOCK; hook early-out */
+static uint32_t ovp_sess_gen;       /* bumped on every sess change (placement cache) */
+static void ovp_sess_set(int d, int mode)
+{
+    int i, n = 0;
+    int prev;
+    if (d < 0 || d >= NDECK) return;
+    prev = ovp_sess[d];
+    ovp_sess[d] = (uint8_t)mode;
+    for (i = 0; i < NDECK; i++) n += ovp_sess[i] != OVP_SESS_STOCK;
+    __atomic_store_n(&ovp_place_needed, (uint32_t)n, __ATOMIC_RELAXED);
+    /* Always bump: a second SHIFT+pad pick stays PICKED but the loop moved. */
+    __atomic_add_fetch(&ovp_sess_gen, 1u, __ATOMIC_RELAXED);
+    if (mode == OVP_SESS_PICKED && prev != OVP_SESS_PICKED)
+        LOG("deck %d: overview marker follows the current Active Loop", d + 1);
+    else if (mode == OVP_SESS_CLEARED && prev != OVP_SESS_CLEARED)
+        LOG("deck %d: overview marker hidden (unflagged or no live target after exit)", d + 1);
+}
 static int pick_and_set(int d, const uint8_t *c, int hot, int idx, const char *why)
 {
     char t[32]; fmt_time(t, sizeof t, cue_in(c));
@@ -2263,7 +2352,8 @@ static void apply_set(int d)
     }
     LOG("pick deck %d: %d loops ahead of playhead %s; cycling after %s%s", d + 1, n, tp,
         cur && after != pos ? ta : "the playhead", wrapped ? " -> wrapped to the first" : "");
-    pick_and_set(d, c, hot, idx, "SHIFT+MEMORY pick");
+    if (pick_and_set(d, c, hot, idx, "SHIFT+MEMORY pick") == 0)
+        ovp_sess_set(d, OVP_SESS_PICKED);
 }
 /* restore keeps the 0.1.x signature */
 static void set_active_mem(int d, int i, const char *why)
@@ -2847,6 +2937,7 @@ static void al_off(int d, int kind)
         return;
     }
     if (act_ok[d] && clear_active(d, "SHIFT+pad toggle off") != 0) return;     /* busy: press again */
+    ovp_sess_set(d, OVP_SESS_CLEARED);
     LOG("deck %d: SHIFT+pad on the armed pad (hot cue %d at %s): Active Loop off%s", d + 1, kind, t,
         pc == PC_DONE ? ", saved flag removed" : pc == PC_KEPT ? ", the saved flag of another loop stays" : " (nothing saved for it)");
     if (pc == PC_KEPT) toastf("Active Loop off at %s (its saved flag stays in the track)", t);
@@ -2865,6 +2956,7 @@ static void apply_pad(int s, int d, int kind)
         int pr = pick_and_set(d, hot_buf[d][kind], 1, kind, "SHIFT+pad hot cue");
         pick_quiet = 0;
         if (pr != 0) return;
+        ovp_sess_set(d, OVP_SESS_PICKED);
         char t[32]; fmt_time(t, sizeof t, cue_in(hot_buf[d][kind]));
         int ps = persist_set(d, hot_buf[d][kind]);
         toastf(ps == PS_OK ? "Active Loop saved: hot cue at %s" :
@@ -2957,7 +3049,8 @@ static void watch_loops(void)
                 if (c) {
                     char tn[32]; fmt_time(tn, sizeof tn, cue_in(c));
                     LOG("auto-advance deck %d: next loop ahead at %s (%d ahead), source: %s", d + 1, tn, count_known(d, pos), src);
-                    pick_and_set(d, c, hot, idx, "auto-advance");
+                    if (pick_and_set(d, c, hot, idx, "auto-advance") == 0)
+                        ovp_sess_set(d, OVP_SESS_PICKED);
                     continue;
                 }
                 LOG("auto-advance deck %d: no stored loop ahead of %s (%d known) -> clearing the exited loop",
@@ -2967,6 +3060,9 @@ static void watch_loops(void)
             }
             if (request(d, OP_CLEAR, NULL, "exit clear") != 0) { LOG("deck %d: exit clear busy, retry", d + 1); continue; }
             spent[d] = 1; ex_inside[d] = 0; ex_past[d] = 0;
+            /* No live target after exit (none ahead, or Auto-advance OFF).
+             * Do not show a stored flag behind the playhead as still Active. */
+            ovp_sess_set(d, OVP_SESS_CLEARED);
             restore_pending[d] = 0;
             do_toast(adv ? "Active Loop done (none ahead)" : "Active Loop done");
         } else {
@@ -2990,6 +3086,7 @@ static void sync_cfg(void)
         if (h_rearm >= 0 && C->row_value(h_rearm) != 1) b &= ~CFG_REARM;
         if (h_pulse >= 0 && C->row_value(h_pulse) != 1) b &= ~CFG_PULSE;
         if (h_popups >= 0 && C->row_value(h_popups) != 1) b &= ~CFG_TOAST;
+        if (h_ovpulse >= 0 && C->row_value(h_ovpulse) == 1 && (b & CFG_ENABLE)) b |= CFG_OVPULSE;
     }
     b |= ((uint32_t)COMBO_SHIFT_MEMORY & 3u) << 1;
     __atomic_store_n(&cfg_bits, b, __ATOMIC_RELAXED);
@@ -3349,6 +3446,7 @@ static void track_changed(int d, const char *why)
     spent[d] = 0; ex_inside[d] = 0; ex_past[d] = 0;
     dg_near[d] = 0; dg_stall[d] = 0; dg_pos[d] = -1; dg_ns[d] = 0;
     last_call_ok[d] = 0; act_src_hot[d] = 0; act_src_idx[d] = 0; hot_chk[d] = 0;
+    ovp_sess_set(d, OVP_SESS_STOCK);
     restore_pending[d] = rem_ok[d] && rem_cid[d] != 0;      /* only a remembered loop of the previous load can come back */
     restore_wait[d] = 0;
 }
@@ -3663,6 +3761,1613 @@ static void publish_arm(int d)
     int64_t a = (act_ok[d] && !spent[d] && (cf & CFG_ENABLE) && (cf & CFG_REARM)) ? active_in[d] : INT64_MAX;
     __atomic_store_n(&arm_in[d], a, __ATOMIC_RELAXED);
 }
+/* 0.2.16: log-only overview-marker probe. Hooks only increment counters and stash
+ * this/colour; the tick writes at most a few lines per second. When CFG_OVPULSE is
+ * off, each hook is a pass-through (two relaxed atomic loads, then the original). */
+/* Four decks x SOURCE/WAVEFORM, plus bounded headroom for view rebuilds.
+ * Four slots silently starved later deck-3/4 widgets after the first layer. */
+#define OVP_SLOTS (NDECK * 4)
+_Static_assert(OVP_SLOTS >= NDECK * 2, "SOURCE and WAVEFORM slots for every deck");
+static uint32_t ovp_note_dropped;
+static uintptr_t ovp_paint_ptr[OVP_SLOTS], ovp_upd_ptr[OVP_SLOTS];
+static uint32_t  ovp_paint_col[OVP_SLOTS], ovp_upd_col[OVP_SLOTS];
+static uint32_t  ovp_paint_n[OVP_SLOTS],   ovp_upd_n[OVP_SLOTS];
+static uint64_t  ovp_paint_seen[OVP_SLOTS], ovp_upd_seen[OVP_SLOTS]; /* last ORGANIC paint / update ns */
+static uint32_t  ovp_paint_total, ovp_upd_total;
+/* juce::Component::repaint() queues an async paint — a wrap around the call
+ * does NOT cover the later Bar::paint. Per-Bar suppress window: after we
+ * schedule repaint, organic note/live selection ignores paints of that Bar
+ * until ovp_sup_until (covers coalesced deferred paints; no self-feed). */
+#define OVP_SUPPRESS_NS 150000000ull  /* 150 ms > 100 ms repaint cap */
+#define OVP_UPD_FRESH_NS 500000000ull /* 0.5 s: hidden trees drop to calls=0 */
+#define OVP_SUP_TRACK OVP_SLOTS
+static uintptr_t ovp_sup_bar[OVP_SUP_TRACK];
+static uint64_t  ovp_sup_until[OVP_SUP_TRACK];
+/* On-screen Bar per deck: the ActiveLoopBar (embedded Bar) with the newest
+ * ovp_upd_seen within OVP_UPD_FRESH_NS. Hidden trees go stale and are not
+ * live (al0216i: SOURCE kept breathing after calls=0). Organic paint_seen
+ * only breaks ties among fresh-update bars; our Component::repaint is
+ * suppressed so it cannot self-feed paint_seen. Visible-paused bars keep
+ * updating (~40-60/s) so pause still breathes. Pulse OFF / dead bar clears. */
+static uintptr_t ovp_live_bar[NDECK];
+static int ovp_bar_alive(uintptr_t bar);
+typedef void (*bar_paint_fn)(void *self, void *g);
+typedef void (*alb_update_fn)(void *self);
+static bar_paint_fn  orig_bar_paint;
+static alb_update_fn orig_alb_update;
+
+static void ovp_note(uintptr_t *ptrs, uint32_t *cols, uint32_t *ns, uint64_t *seen,
+                     uintptr_t p, uint32_t col)
+{
+    int i;
+    uint64_t now;
+    if (!p) return;
+    now = now_ns();
+    for (i = 0; i < OVP_SLOTS; i++) {
+        uintptr_t cur = __atomic_load_n(&ptrs[i], __ATOMIC_RELAXED);
+        if (cur == p) {
+            __atomic_store_n(&cols[i], col, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&ns[i], 1u, __ATOMIC_RELAXED);
+            __atomic_store_n(&seen[i], now, __ATOMIC_RELAXED);
+            return;
+        }
+        if (cur == 0) {
+            uintptr_t expected = 0;
+            if (__atomic_compare_exchange_n(&ptrs[i], &expected, p, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+                __atomic_store_n(&cols[i], col, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&ns[i], 1u, __ATOMIC_RELAXED);
+                __atomic_store_n(&seen[i], now, __ATOMIC_RELAXED);
+                return;
+            }
+            if (__atomic_load_n(&ptrs[i], __ATOMIC_RELAXED) == p) {
+                __atomic_store_n(&cols[i], col, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&ns[i], 1u, __ATOMIC_RELAXED);
+                __atomic_store_n(&seen[i], now, __ATOMIC_RELAXED);
+                return;
+            }
+        }
+    }
+    __atomic_add_fetch(&ovp_note_dropped, 1u, __ATOMIC_RELAXED);
+}
+
+static int ovp_sup_slot(uintptr_t bar)
+{
+    int i, free_i = -1;
+    for (i = 0; i < OVP_SUP_TRACK; i++) {
+        if (ovp_sup_bar[i] == bar) return i;
+        if (free_i < 0 && ovp_sup_bar[i] == 0) free_i = i;
+    }
+    return free_i >= 0 ? free_i : 0;
+}
+
+/* Mark Bar so deferred Bar::paint from our Component::repaint is non-organic. */
+static void ovp_suppress_bar_until(uintptr_t bar, uint64_t now)
+{
+    int s;
+    if (!bar) return;
+    s = ovp_sup_slot(bar);
+    ovp_sup_bar[s] = bar;
+    /* Extend, don't shorten, if already suppressed (coalesced repaints). */
+    if (ovp_sup_until[s] < now + OVP_SUPPRESS_NS)
+        ovp_sup_until[s] = now + OVP_SUPPRESS_NS;
+}
+
+/* 1 = this paint is from our queued repaint (or still inside suppress window). */
+static int ovp_paint_is_ours(uintptr_t bar, uint64_t now)
+{
+    int i;
+    if (!bar) return 0;
+    for (i = 0; i < OVP_SUP_TRACK; i++) {
+        if (ovp_sup_bar[i] == bar)
+            return now < ovp_sup_until[i];
+    }
+    return 0;
+}
+
+static void my_bar_paint(void *self, void *g)
+{
+    if (__builtin_expect(__atomic_load_n(&al_live, __ATOMIC_ACQUIRE), 1) &&
+        (__atomic_load_n(&cfg_bits, __ATOMIC_RELAXED) & CFG_OVPULSE)) {
+        uint64_t now = now_ns();
+        uintptr_t bar = (uintptr_t)self;
+        uint32_t col = 0;
+        /* Deferred paints after our Component::repaint must not count organic. */
+        if (!ovp_paint_is_ours(bar, now)) {
+            if (self)
+                col = *(const volatile uint32_t *)((const char *)self + BAR_COLOUR_OFF);
+            ovp_note(ovp_paint_ptr, ovp_paint_col, ovp_paint_n, ovp_paint_seen, bar, col);
+            __atomic_add_fetch(&ovp_paint_total, 1u, __ATOMIC_RELAXED);
+        }
+    }
+    orig_bar_paint(self, g);
+}
+
+static void ovp_alb_apply_place(void *self);
+static void my_alb_update(void *self)
+{
+    if (__builtin_expect(__atomic_load_n(&al_live, __ATOMIC_ACQUIRE), 1) &&
+        (__atomic_load_n(&cfg_bits, __ATOMIC_RELAXED) & CFG_OVPULSE)) {
+        uint32_t col = 0;
+        if (self)
+            col = *(const volatile uint32_t *)((const char *)self + ALB_COLOUR_OFF);
+        ovp_note(ovp_upd_ptr, ovp_upd_col, ovp_upd_n, ovp_upd_seen, (uintptr_t)self, col);
+        __atomic_add_fetch(&ovp_upd_total, 1u, __ATOMIC_RELAXED);
+    }
+    orig_alb_update(self);
+    /* Reposition or hide after stock placement. Independent of the Pulse row:
+     * the marker follows the current Active Loop even when the breath is off. */
+    if (__builtin_expect(__atomic_load_n(&al_live, __ATOMIC_ACQUIRE), 1) &&
+        (__atomic_load_n(&cfg_bits, __ATOMIC_RELAXED) & CFG_ENABLE) &&
+        __atomic_load_n(&ovp_place_needed, __ATOMIC_RELAXED))
+        ovp_alb_apply_place(self);
+}
+
+/* SDK identity: pad-mode objects and tile deckstates only. ALB/Bar themselves
+ * always returned -1 in al0216a; still tried first so a core that learns them works. */
+static int ovp_sdk_deck(void *obj)
+{
+    int d;
+    if (!obj || !C) return -1;
+    if (AZ_HAS(C, deck_for_modeobj)) {
+        d = C->deck_for_modeobj(obj);
+        if (d >= 0 && d < NDECK) return d;
+    }
+    if (AZ_HAS(C, deck_for_ds)) {
+        d = C->deck_for_ds(obj);
+        if (d >= 0 && d < NDECK) return d;
+    }
+    return -1;
+}
+
+/* blk is a PlayerInfoState per-deck block (stride 0x1400, word 0 = player index).
+ * Accept only when the layout is confirmed: SDK agrees with word 0, or the
+ * make_shared control block in front of the state has the PlayerInfoState vtable.
+ * Word 0 alone is never enough. */
+static int ovp_from_perdeck(uintptr_t blk, const char **how)
+{
+    uint64_t w0 = 0, vt = 0, mode = 0, ds = 0;
+    int idx, vt_ok;
+    if (!blk || safe_read(blk, &w0, 8) != 0 || w0 >= (uint64_t)NDECK) return -1;
+    idx = (int)w0;
+    vt_ok = (safe_read(blk - (uintptr_t)idx * PERDECK_STRIDE - PISCTRL_OFF, &vt, 8) == 0 &&
+             vt == PISCTRL_VT);
+    if (safe_read(blk + PERDECK_MODEOBJ, &mode, 8) == 0 && mode > 0x10000) {
+        if (ovp_sdk_deck((void *)mode) == idx) { *how = "perdeck+modeobj"; return idx; }
+    }
+    if (safe_read(blk + PERDECK_TILEDS, &ds, 8) == 0 && ds > 0x10000) {
+        if (ovp_sdk_deck((void *)ds) == idx) { *how = "perdeck+tileds"; return idx; }
+    }
+    if (vt_ok) { *how = "perdeck+pis"; return idx; }
+    return -1;
+}
+
+/* Read the fields update() uses to decide visibility:
+ *   managed = **(ALB+0x58);  in = managed+0xe0;  out = managed+0xe8.
+ * Sentinel 0x7fffffffffffffff (INT64_MAX) means hide the bar.
+ * Runtime (al0216j Cola): these logged as playhead_ms:duration_ms
+ * (78:415720), not the flagged loop 17354310:18048312. update() only
+ * checks them against the sentinel, then places X with player+0x510 / +0xe8.
+ * Do not treat a successful read as "these are the flagged loop extents". */
+static int ovp_loop_ends(uintptr_t alb, int64_t *lin, int64_t *lout)
+{
+    uintptr_t p58 = 0, managed = 0;
+    int64_t a = 0, b = 0;
+    if (!alb) return -1;
+    if (safe_read(alb + ALB_P58_OFF, &p58, 8) != 0 || p58 < 0x10000) return -1;
+    if (safe_read(p58, &managed, 8) != 0 || managed < 0x10000) return -1;
+    if (safe_read(managed + ALB_LOOP_IN_OFF, &a, 8) != 0) return -1;
+    if (safe_read(managed + ALB_LOOP_OUT_OFF, &b, 8) != 0) return -1;
+    *lin = a;
+    *lout = b;
+    return 0;
+}
+
+/* True when both endpoint pairs describe the same loop. Firmware times are
+ * usually cue samples (44.1 kHz); some fields store whole milliseconds, so
+ * that conversion is tried too. near_del (0.5 s) covers the known ANLZ slop. */
+static int ovp_ends_eq(int64_t a0, int64_t a1, int64_t b0, int64_t b1)
+{
+    if (a0 == INT64_MAX || a1 == INT64_MAX || a1 <= a0) return 0;
+    if (b0 == INT64_MAX || b1 == INT64_MAX || b1 <= b0) return 0;
+    if (near_del(a0, b0) && near_del(a1, b1)) return 1;
+    if (a0 > 0 && a0 < 100000000LL && a1 < 100000000LL) {
+        if (near_del((int64_t)(a0 * 44.1 + 0.5), b0) &&
+            near_del((int64_t)(a1 * 44.1 + 0.5), b1)) return 1;
+    }
+    if (b0 > 0 && b0 < 100000000LL && b1 < 100000000LL) {
+        if (near_del(a0, (int64_t)(b0 * 44.1 + 0.5)) &&
+            near_del(a1, (int64_t)(b1 * 44.1 + 0.5))) return 1;
+    }
+    return 0;
+}
+
+/* Unique match of firmware in/out against this session's decks. Armed first,
+ * then a flagged memory loop, then any cached memory / hot / last-call loop.
+ * Two decks claiming the same endpoints stay unknown (never a guess). */
+static int ovp_match_loop(int64_t lin, int64_t lout, const char **how)
+{
+    int hit = -1, n = 0, d, i, k;
+
+    if (lin == INT64_MAX || lout == INT64_MAX || lout <= lin) return -1;
+
+    for (d = 0; d < NDECK; d++) {
+        if (!act_ok[d] || spent[d]) continue;
+        if (ovp_ends_eq(lin, lout, active_in[d], active_out[d])) {
+            hit = d;
+            n++;
+        }
+    }
+    if (n == 1) { *how = "loop-armed"; return hit; }
+    if (n > 1) { *how = "loop-clash"; return -1; }
+
+    hit = -1;
+    n = 0;
+    for (d = 0; d < NDECK; d++) {
+        int yes = 0;
+        for (i = 0; i < mem_n[d]; i++) {
+            if (!mem_ok[d][i] || !mem_flag[d][i]) continue;
+            if (ovp_ends_eq(lin, lout, cue_in(mem_buf[d][i]), cue_out(mem_buf[d][i]))) {
+                yes = 1;
+                break;
+            }
+        }
+        if (yes) { hit = d; n++; }
+    }
+    if (n == 1) { *how = "loop-flagged"; return hit; }
+    if (n > 1) { *how = "loop-clash"; return -1; }
+
+    hit = -1;
+    n = 0;
+    for (d = 0; d < NDECK; d++) {
+        int yes = 0;
+        if (last_call_ok[d] && ovp_ends_eq(lin, lout, last_call_in[d], last_call_out[d]))
+            yes = 1;
+        for (i = 0; !yes && i < mem_n[d]; i++) {
+            if (!mem_ok[d][i]) continue;
+            if (ovp_ends_eq(lin, lout, cue_in(mem_buf[d][i]), cue_out(mem_buf[d][i])))
+                yes = 1;
+        }
+        for (k = 1; !yes && k < NHOT; k++) {
+            if (!hot_ok[d][k]) continue;
+            if (ovp_ends_eq(lin, lout, cue_in(hot_buf[d][k]), cue_out(hot_buf[d][k])))
+                yes = 1;
+        }
+        if (yes) { hit = d; n++; }
+    }
+    if (n == 1) { *how = "loop-cached"; return hit; }
+    if (n > 1) { *how = "loop-clash"; return -1; }
+    return -1;
+}
+
+static int ovp_rtti_name(uintptr_t obj, char *dst, size_t dstn)
+{
+    uintptr_t vt = 0, ti = 0, np = 0;
+    char raw[80];
+    size_t i;
+    if (!dstn) return -1;
+    dst[0] = 0;
+    if (!obj || safe_read(obj, &vt, 8) != 0 || !plausible(vt)) return -1;
+    if (safe_read(vt - 8, &ti, 8) != 0 || !plausible(ti)) return -1;
+    if (safe_read(ti + 8, &np, 8) != 0 || np < 0x10000u || np >= ((uintptr_t)1 << 48))
+        return -1;
+    memset(raw, 0, sizeof raw);
+    if (safe_read(np, raw, sizeof raw - 1) != 0) return -1;
+    raw[sizeof raw - 1] = 0;
+    if (raw[0] != 'N' && raw[0] != 'Z' && raw[0] != 'S') return -1;
+    for (i = 0; i < sizeof raw && raw[i]; i++)
+        if ((unsigned char)raw[i] < 32 || (unsigned char)raw[i] > 126) {
+            raw[i] = 0;
+            break;
+        }
+    if (i < 6) return -1;
+    snprintf(dst, dstn, "%s", raw);
+    return 0;
+}
+
+static int ovp_name_has(const char *name, const char *key)
+{
+    return name && key && strstr(name, key) != NULL;
+}
+
+static void ovp_anc_short(const char *name, char *dst, size_t n)
+{
+    static const char *known[] = {
+        "WaveformView", "DeckInfo2Deck", "DeckInfo4Deck",
+        "PlayerInfoWaveform", "BrowsePreview", "Previewable",
+        "source_select", "browser_logic", "SimpleWaveform",
+        "normal_player_info", NULL
+    };
+    int i;
+    if (!name || !name[0]) { snprintf(dst, n, "?"); return; }
+    for (i = 0; known[i]; i++)
+        if (strstr(name, known[i])) { snprintf(dst, n, "%s", known[i]); return; }
+    snprintf(dst, n, "%s", name);
+}
+
+/* Both ctor sites build gui::PlayerInfoWaveformWidget (same class). al0216a
+ * showed a distinct SOURCE pointer pair vs a waveform pair: each view only
+ * calls update() while it is on screen. Walk Bar's Component parent at +0x70
+ * (the same offset repaint uses) and classify from ancestor RTTI. al0216b:
+ * RTTI never fired (view=? anc=? on 1328/1328 lines); w=590 vs w=373 still
+ * separated the pairs, so ovp_view_from_w is the runtime fallback. */
+static const char *ovp_view_from_w(uint32_t w, int have_w)
+{
+    if (!have_w) return "?";
+    if (w >= 500u) return "waveform";   /* al0216a/b waveform overview ~590 */
+    if (w >= 280u && w <= 450u) return "source"; /* SOURCE/browse ~373 */
+    return "?";
+}
+
+static const char *ovp_view_kind(uintptr_t alb, char *anc, size_t anc_n)
+{
+    uintptr_t comp, parent, first_parent = 0;
+    int i, wave = 0, src = 0;
+    char name[96], first[48];
+
+    if (anc && anc_n) { anc[0] = 0; snprintf(anc, anc_n, "?"); }
+    first[0] = 0;
+    if (!alb) return "?";
+    comp = alb + ALB_BAR_OFF + BAR_COMPONENT_OFF;
+    for (i = 0; i < 10; i++) {
+        if (safe_read(comp + COMP_PARENT_OFF, &parent, 8) != 0 || parent < 0x10000)
+            break;
+        if (!first_parent) first_parent = parent;
+        if (ovp_rtti_name(parent, name, sizeof name) == 0) {
+            if (ovp_name_has(name, "WaveformView") ||
+                ovp_name_has(name, "DeckInfo2Deck") ||
+                ovp_name_has(name, "DeckInfo4Deck"))
+                wave = 1;
+            if (ovp_name_has(name, "Browse") || ovp_name_has(name, "browse") ||
+                ovp_name_has(name, "Preview") || ovp_name_has(name, "preview") ||
+                ovp_name_has(name, "source_select") ||
+                ovp_name_has(name, "browser_logic"))
+                src = 1;
+            if (!first[0] &&
+                !ovp_name_has(name, "ActiveLoopBar") &&
+                !ovp_name_has(name, "UpdaterComponent") &&
+                !ovp_name_has(name, "UpdatableWidget") &&
+                !ovp_name_has(name, "juce9Component"))
+                ovp_anc_short(name, first, sizeof first);
+        }
+        comp = parent;
+    }
+    if (anc && anc_n) {
+        if (first[0]) snprintf(anc, anc_n, "%s", first);
+        else if (first_parent)
+            snprintf(anc, anc_n, "p:%llx", (unsigned long long)first_parent);
+        else snprintf(anc, anc_n, "?");
+    }
+    if (src && !wave) return "source";
+    if (wave && !src) return "waveform";
+    if (src && wave) return "both";
+    return "?";
+}
+
+static uintptr_t ovp_alb_of(uintptr_t p, int is_alb)
+{
+    uintptr_t vp = 0;
+    if (!p) return 0;
+    if (is_alb) {
+        if (safe_read(p, &vp, 8) == 0 && vp == VT_ALB) return p;
+        return 0;
+    }
+    if (safe_read(p - ALB_BAR_OFF, &vp, 8) == 0 && vp == VT_ALB)
+        return p - ALB_BAR_OFF;
+    return 0;
+}
+
+/* Shared pulse/placement identity. Re-read the current interior-pointer pair
+ * every time: no permanent ALB -> deck cache across layers. PlayerInfoState
+ * word 0 is global 0..3 (not hardware side 0..1), validated by SDK/PIS vtable.
+ * tempo-range likewise uses global player id 0..3 and treats side separately;
+ * its TempoCtl/PBU offsets do NOT apply to an ActiveLoopBar. */
+static int ovp_deck_structural(uintptr_t alb, const char **how)
+{
+    uintptr_t p50 = 0, p58 = 0, p60 = 0, player = 0;
+    int d;
+    *how = "none";
+    if (!ovp_alb_of(alb, 1)) return -1;
+    if (safe_read(alb + ALB_P50_OFF, &p50, 8) == 0 &&
+        safe_read(alb + ALB_P58_OFF, &p58, 8) == 0 &&
+        p50 > PIS_SP50 && p58 > PIS_SP58 &&
+        p50 - PIS_SP50 == p58 - PIS_SP58) {
+        d = ovp_from_perdeck(p50 - PIS_SP50, how);
+        if (d >= 0 && d < NDECK) return d;
+    }
+    d = ovp_sdk_deck((void *)alb);
+    if (d >= 0 && d < NDECK) { *how = "sdk(self)"; return d; }
+    d = ovp_sdk_deck((void *)(alb + ALB_BAR_OFF));
+    if (d >= 0 && d < NDECK) { *how = "sdk(bar)"; return d; }
+    if (safe_read(alb + ALB_P60_OFF, &p60, 8) == 0 && p60 > 0x10000) {
+        d = ovp_sdk_deck((void *)p60);
+        if (d >= 0 && d < NDECK) { *how = "sdk(+0x60)"; return d; }
+        if (safe_read(p60, &player, 8) == 0 && player > 0x10000) {
+            d = ovp_sdk_deck((void *)player);
+            if (d >= 0 && d < NDECK) { *how = "sdk(player)"; return d; }
+        }
+    }
+    return -1;
+}
+static void ovp_rebind_bar(uintptr_t alb, int deck);
+
+/* Loop matching is a diagnostic fallback only, never a colour/placement
+ * authority. +0xe0/+0xe8 are visibility/time fields, NOT cue extents: a
+ * coincidental loop match must not veto a validated four-deck structural id. */
+static int ovp_deck_resolve(uintptr_t p, int is_alb, const char **how)
+{
+    uintptr_t alb = ovp_alb_of(p, is_alb);
+    int64_t lin = 0, lout = 0;
+    int d = ovp_deck_structural(alb, how);
+    if (alb) ovp_rebind_bar(alb, d);
+    if (d >= 0) return d;
+    if (alb && ovp_loop_ends(alb, &lin, &lout) == 0)
+        return ovp_match_loop(lin, lout, how);
+    return -1;
+}
+
+/* Colour writes require a structural map. Loop in/out fallbacks and clashes
+ * stay log-only: ambiguous or unknown identity must leave the bar untouched.
+ * view=/w= is never an input here. */
+static int ovp_colour_allowed(const char *how)
+{
+    if (!how) return 0;
+    if (!strncmp(how, "perdeck+", 8)) return 1;   /* perdeck+modeobj / +tileds / +pis */
+    if (!strncmp(how, "sdk(", 4)) return 1;        /* sdk(self/bar/component/+0x60/player) */
+    return 0; /* none, clash, loop-*, loop-clash, engine/holder */
+}
+
+/* 1 = this ActiveLoopBar still has recent update() activity (on-screen).
+ * Hidden / idle trees fall to calls=0 and go stale within OVP_UPD_FRESH_NS. */
+static int ovp_upd_fresh(uint64_t seen, uint64_t now)
+{
+    if (!seen) return 0;
+    return (now - seen) <= OVP_UPD_FRESH_NS;
+}
+
+/* 1 if candidate A should replace current best B as the live bar.
+ * Stale updates never win. Newest upd_seen wins among fresh bars;
+ * equal upd_seen → newer organic paint_seen (tie-break only). */
+static int ovp_live_better(uint64_t a_upd, uint64_t a_paint,
+                           uint64_t b_upd, uint64_t b_paint, uint64_t now)
+{
+    int a_ok = ovp_upd_fresh(a_upd, now);
+    int b_ok = ovp_upd_fresh(b_upd, now);
+    if (!a_ok) return 0;
+    if (!b_ok) return 1;
+    if (a_upd != b_upd) return a_upd > b_upd;
+    return a_paint > b_paint;
+}
+
+/* Pure: among one deck's candidate Bars, pick the live one (or 0 if none fresh).
+ * paint may be NULL (treated as 0). Used by refresh + host tests. */
+static uintptr_t ovp_pick_live_bar(const uintptr_t *bars, const uint64_t *upd,
+                                   const uint64_t *paint, int n, uint64_t now)
+{
+    uintptr_t best = 0;
+    uint64_t best_upd = 0, best_paint = 0;
+    int i;
+    if (!bars || !upd || n <= 0) return 0;
+    for (i = 0; i < n; i++) {
+        uint64_t p = paint ? paint[i] : 0;
+        if (!bars[i] || !ovp_upd_fresh(upd[i], now)) continue;
+        if (!best || ovp_live_better(upd[i], p, best_upd, best_paint, now)) {
+            best = bars[i];
+            best_upd = upd[i];
+            best_paint = p;
+        }
+    }
+    return best;
+}
+
+static uint64_t ovp_paint_seen_of(uintptr_t bar)
+{
+    int i;
+    if (!bar) return 0;
+    for (i = 0; i < OVP_SLOTS; i++) {
+        if (__atomic_load_n(&ovp_paint_ptr[i], __ATOMIC_RELAXED) == bar)
+            return __atomic_load_n(&ovp_paint_seen[i], __ATOMIC_RELAXED);
+    }
+    return 0;
+}
+
+/* Pure gate used by mutate + unit tests. force_solid = row-off restore path.
+ * is_live_bar: selected on-screen bar for its deck.
+ * upd_fresh: that bar's ActiveLoopBar::update was seen within OVP_UPD_FRESH_NS.
+ * A stale update is never mutated (al0216i idle SOURCE with calls=0).
+ * Our Component::repaint schedules async paint; ovp_suppress_bar_until covers
+ * deferred Bar::paint so it cannot self-feed paint_seen / steal live. */
+static int ovp_should_mutate(int deck, const char *how, int force_solid, int was_mutated,
+                             int is_live_bar, int upd_fresh)
+{
+    if (force_solid) return was_mutated != 0;
+    if (deck < 0 || deck >= NDECK || !ovp_colour_allowed(how)) return 0;
+    if (!is_live_bar || !upd_fresh) return 0;
+    return 1;
+}
+
+/* Refresh live bars from ActiveLoopBar::update slots. Newest fresh upd_seen
+ * per deck wins; organic paint_seen only breaks ties. No fresh update →
+ * clear sticky (idle tree must go solid). Our deferred paints do not update
+ * paint_seen (suppress window) and do not create update activity. */
+static void ovp_refresh_live_bars(uint64_t now)
+{
+    uintptr_t cand_bar[NDECK][OVP_SLOTS];
+    uint64_t  cand_upd[NDECK][OVP_SLOTS], cand_paint[NDECK][OVP_SLOTS];
+    int n_cand[NDECK];
+    int i, d;
+    for (d = 0; d < NDECK; d++)
+        n_cand[d] = 0;
+    for (i = 0; i < OVP_SLOTS; i++) {
+        uintptr_t alb = __atomic_load_n(&ovp_upd_ptr[i], __ATOMIC_RELAXED);
+        uint64_t seen = __atomic_load_n(&ovp_upd_seen[i], __ATOMIC_RELAXED);
+        uintptr_t alb_ok, bar, vp = 0;
+        const char *how = "none";
+        int deck, k;
+        if (!alb || !ovp_upd_fresh(seen, now)) continue;
+        if (safe_read(alb, &vp, 8) != 0 || vp != VT_ALB) continue;
+        alb_ok = ovp_alb_of(alb, 1);
+        if (!alb_ok) continue;
+        bar = alb_ok + ALB_BAR_OFF;
+        if (!ovp_bar_alive(bar)) continue;
+        deck = ovp_deck_resolve(alb, 1, &how);
+        if (deck < 0 || deck >= NDECK || !ovp_colour_allowed(how)) continue;
+        k = n_cand[deck];
+        if (k >= OVP_SLOTS) continue;
+        cand_bar[deck][k] = bar;
+        cand_upd[deck][k] = seen;
+        cand_paint[deck][k] = ovp_paint_seen_of(bar);
+        n_cand[deck] = k + 1;
+    }
+    for (d = 0; d < NDECK; d++)
+        __atomic_store_n(&ovp_live_bar[d],
+                         ovp_pick_live_bar(cand_bar[d], cand_upd[d], cand_paint[d],
+                                           n_cand[d], now),
+                         __ATOMIC_RELAXED);
+}
+
+static int ovp_bar_is_live(int deck, uintptr_t bar)
+{
+    if (deck < 0 || deck >= NDECK || !bar) return 0;
+    return __atomic_load_n(&ovp_live_bar[deck], __ATOMIC_RELAXED) == bar;
+}
+
+static const char *ovp_deck_txt(int d)
+{
+    return d == 0 ? "1" : d == 1 ? "2" : d == 2 ? "3" : d == 3 ? "4" : "?";
+}
+
+/* Quiet logging against the core's hard 256 KB /tmp alog cap (docs/09-logs.md):
+ * past that, lines are dropped until the next EP147 start. al0216b filled it
+ * in ~5 min at 1 Hz × ~6 slots. Emit a slot line only on signature change, or
+ * on a 5 s heartbeat; keep the rate summary on the same 5 s cadence. */
+#define OVP_SEEN (OVP_SLOTS * 2) /* both Bar and ALB logging identities */
+#define OVP_HEARTBEAT_NS 60000000000ull  /* 60 s rate line only; slots are change-only */
+struct ovp_seen {
+    uintptr_t p;
+    int       deck;
+    uint32_t  w, col, calls;
+    char      how[28], view[16], loop[56], vst[8], anc[48];
+    uint64_t  last_log_ns;
+};
+static struct ovp_seen ovp_seen[OVP_SEEN];
+
+static struct ovp_seen *ovp_seen_get(uintptr_t p)
+{
+    int i, free_i = -1;
+    for (i = 0; i < OVP_SEEN; i++) {
+        if (ovp_seen[i].p == p) return &ovp_seen[i];
+        if (free_i < 0 && ovp_seen[i].p == 0) free_i = i;
+    }
+    if (free_i < 0) free_i = 0; /* overwrite oldest slot 0 if full */
+    memset(&ovp_seen[free_i], 0, sizeof ovp_seen[free_i]);
+    ovp_seen[free_i].p = p;
+    return &ovp_seen[free_i];
+}
+
+static void ovp_log_gate(uintptr_t alb, int deck, const char *how, uint64_t now);
+static void ovp_log_gate_reset(void);
+
+static void ovp_log_slots(const char *kind, uintptr_t *ptrs, uint32_t *cols, uint32_t *ns,
+                          uintptr_t expect_vt, unsigned colour_off, int is_alb,
+                          int force_heartbeat, uint64_t now)
+{
+    int i;
+    for (i = 0; i < OVP_SLOTS; i++) {
+        uintptr_t p = __atomic_load_n(&ptrs[i], __ATOMIC_RELAXED);
+        uint32_t n = __atomic_exchange_n(&ns[i], 0u, __ATOMIC_RELAXED);
+        uint32_t hook_col = __atomic_load_n(&cols[i], __ATOMIC_RELAXED);
+        uintptr_t vp = 0, alb, a = 0, b = 0, c = 0;
+        uint32_t live_col = 0, w = 0;
+        int deck, have_w, have_loop, changed;
+        int64_t lin = 0, lout = 0;
+        const char *vst, *how = "none", *view;
+        char anc[48], loop_s[64], w_s[24];
+        struct ovp_seen *se;
+
+        if (!p) continue;
+        if (safe_read(p, &vp, sizeof vp) != 0) {
+            LOG("overview-pulse: %s %p unreadable (view rebuilt?); dropping", kind, (void *)p);
+            __atomic_store_n(&ptrs[i], 0, __ATOMIC_RELAXED);
+            continue;
+        }
+        vst = (vp == expect_vt) ? "ok" : "OTHER";
+        if (vp != expect_vt) {
+            LOG("overview-pulse: %s %p vptr=%p (want %p, %s); dropping",
+                kind, (void *)p, (void *)vp, (void *)expect_vt, vst);
+            __atomic_store_n(&ptrs[i], 0, __ATOMIC_RELAXED);
+            continue;
+        }
+        if (safe_read(p + colour_off, &live_col, sizeof live_col) != 0)
+            live_col = hook_col;
+        deck = ovp_deck_resolve(p, is_alb, &how);
+        alb = ovp_alb_of(p, is_alb);
+        have_w = (alb && safe_read(alb + ALB_WIDTH_OFF, &w, 4) == 0);
+        /* Width classified the pairs in al0216a/b; ancestor RTTI never fired
+         * (view=? anc=?). Prefer w= so a 1 s slot dump does not walk 10 parents. */
+        view = ovp_view_from_w(w, have_w);
+        snprintf(anc, sizeof anc, "?");
+        if (view[0] == '?')
+            view = ovp_view_kind(alb, anc, sizeof anc);
+        have_loop = (alb && ovp_loop_ends(alb, &lin, &lout) == 0);
+        if (have_w) snprintf(w_s, sizeof w_s, "%u", w);
+        else snprintf(w_s, sizeof w_s, "?");
+        if (!have_loop) snprintf(loop_s, sizeof loop_s, "loop=?");
+        else if (lin == INT64_MAX || lout == INT64_MAX)
+            snprintf(loop_s, sizeof loop_s, "loop=none");
+        else
+            snprintf(loop_s, sizeof loop_s, "loop=%lld:%lld",
+                     (long long)lin, (long long)lout);
+        if (alb) {
+            (void)safe_read(alb + ALB_P50_OFF, &a, 8);
+            (void)safe_read(alb + ALB_P58_OFF, &b, 8);
+            (void)safe_read(alb + ALB_P60_OFF, &c, 8);
+        }
+        if (is_alb) ovp_log_gate(alb, deck, how, now);
+        se = ovp_seen_get(p);
+        se->calls += n;
+        changed = (se->deck != deck || se->w != w || se->col != live_col ||
+                   strcmp(se->how, how) != 0 || strcmp(se->view, view) != 0 ||
+                   strcmp(se->loop, loop_s) != 0 || strcmp(se->vst, vst) != 0 ||
+                   strcmp(se->anc, anc) != 0);
+        if (!changed && !force_heartbeat && se->last_log_ns != 0)
+            continue;
+        n = se->calls;
+        se->calls = 0;
+        se->deck = deck; se->w = w; se->col = live_col; se->last_log_ns = now;
+        snprintf(se->how, sizeof se->how, "%s", how);
+        snprintf(se->view, sizeof se->view, "%s", view);
+        snprintf(se->loop, sizeof se->loop, "%s", loop_s);
+        snprintf(se->vst, sizeof se->vst, "%s", vst);
+        snprintf(se->anc, sizeof se->anc, "%s", anc);
+        if (deck < 0) {
+            LOG("overview-pulse: %s %p colour=0x%08x (hook 0x%08x) vptr=%s deck=? via %s view=%s w=%s %s calls=%u p50=%p p58=%p p60=%p anc=%s",
+                kind, (void *)p, live_col, hook_col, vst, how, view, w_s, loop_s, n,
+                (void *)a, (void *)b, (void *)c, anc);
+        } else {
+            LOG("overview-pulse: %s %p colour=0x%08x (hook 0x%08x) vptr=%s deck=%s via %s view=%s w=%s %s calls=%u anc=%s",
+                kind, (void *)p, live_col, hook_col, vst, ovp_deck_txt(deck), how,
+                view, w_s, loop_s, n, anc);
+        }
+        (void)hook_col;
+    }
+}
+
+/* Colour + repaint (AL_OVERVIEW_PULSE_MUTATE). Safety:
+ *   - deck resolved AND ovp_colour_allowed(how): perdeck+* or sdk(*) only
+ *   - loop-* / loop-clash / clash / none / engine/holder -> untouched
+ *   - ActiveLoopBar::update slots only (alb+0x68); no generic Bar::paint mutate path
+ *   - per-deck live Bar = newest ActiveLoopBar::update within 0.5 s (organic paint
+ *     tie-break only; stale update is never mutated; our Component::repaint does not
+ *     refresh organic paint_seen — no self-feed; visible pause still updates so it breathes)
+ *   - ovp_bar_alive() at use; stale slots dropped
+ *   - mutate pass throttled to 100 ms (<=10 Hz); skip resolve when nothing is pending
+ *   - ON-edge init deferred so the menu tap does not share memset/log/first mutate
+ *   - repaint HARD-capped at 100 ms per Bar address (colour sampled on the mutate pass)
+ *   - paint+update cannot double-repaint: one ledger keyed by Bar address
+ *   - only while that deck's bar is the CURRENT Active Loop marker
+ *     (see ovp_flagged_eligible / ovp_current_mark): SHIFT+pad pick, else the
+ *     stored flag; hidden after SHIFT+pad unflag
+ *   - view=/w= never authorises a write
+ *   - row-off restores only Bars we previously mutated
+ * Solid red 0xffff0000 when not eligible / Pulse OFF. */
+#define OVP_SOLID_RED          0xffff0000u
+#define OVP_REPAINT_MIN_NS     100000000ull   /* 10/s */
+#define OVP_MUTATE_MIN_NS      OVP_REPAINT_MIN_NS  /* do not resolve every SDK tick */
+#define OVP_LOG_ON_DEFER_NS    15000000ull    /* 15 ms after menu tap */
+#define OVP_MUTATE_ON_DEFER_NS 30000000ull    /* 30 ms; after logging ON */
+#define OVP_LOG_ON_MIN_TICKS   1u
+#define OVP_MUTATE_ON_MIN_TICKS 2u
+
+/* Pure: should this Bar get Component::repaint now?
+ * Colour changes alone must NEVER return 1 — only the time gate or force. */
+static int ovp_repaint_due(uint64_t last_ns, uint64_t now, int force_repaint)
+{
+    if (force_repaint) return 1;
+    return (now - last_ns) >= OVP_REPAINT_MIN_NS;
+}
+
+/* Pure: full mutate (refresh + resolve + slot walk) at most 10 Hz.
+ * last_ns == 0 means the first pass after ON init. */
+static int ovp_mutate_due(uint64_t last_ns, uint64_t now)
+{
+    if (!last_ns) return 1;
+    return (now - last_ns) >= OVP_MUTATE_MIN_NS;
+}
+
+/* Pure: skip ovp_deck_resolve + ovp_bar_alive when nothing can change colour.
+ * force_solid (row-off): only if a bar was previously mutated.
+ * Otherwise need an update slot AND (flagged deck / live sticky / pending restore). */
+static int ovp_mutate_work_pending(int any_upd, int any_flagged, int any_live,
+                                   int any_mut, int force_solid)
+{
+    if (force_solid) return any_mut != 0;
+    if (!any_upd) return 0;
+    return (any_flagged || any_live || any_mut) != 0;
+}
+
+/* Pure: ON-edge work may run after min_ticks subsequent ticks AND min_ns.
+ * ticks_since_on == 0 is the menu-tap detect tick itself. */
+static int ovp_on_edge_ready(uint64_t on_ns, uint64_t now,
+                             uint32_t ticks_since_on, uint32_t min_ticks,
+                             uint64_t min_ns)
+{
+    if (!on_ns || now < on_ns) return 0;
+    if (ticks_since_on < min_ticks) return 0;
+    return (now - on_ns) >= min_ns;
+}
+
+/* Pure: any organic paint_seen newer than the last live-bar refresh. */
+static int ovp_fresh_paint_notes(const uintptr_t *ptrs, const uint64_t *seen,
+                                 int n, uint64_t last_refresh_ns)
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        if (__atomic_load_n(&ptrs[i], __ATOMIC_RELAXED) &&
+            __atomic_load_n(&seen[i], __ATOMIC_RELAXED) > last_refresh_ns)
+            return 1;
+    }
+    return 0;
+}
+
+static int ovp_any_ptr(const uintptr_t *ptrs, int n)
+{
+    int i;
+    for (i = 0; i < n; i++)
+        if (__atomic_load_n(&ptrs[i], __ATOMIC_RELAXED)) return 1;
+    return 0;
+}
+
+static int ovp_any_u8(const uint8_t *v, int n)
+{
+    int i;
+    for (i = 0; i < n; i++)
+        if (v[i]) return 1;
+    return 0;
+}
+
+/* Pure: same Bar address must share one throttle slot (paint vs update dedup). */
+static int ovp_rep_find(const uintptr_t *bars, int n, uintptr_t bar)
+{
+    int i;
+    for (i = 0; i < n; i++)
+        if (bars[i] == bar) return i;
+    return -1;
+}
+
+typedef void (*ovp_repaint_fn)(void *);
+/* Firmware UI entry point; host regression can substitute a no-I/O stub. */
+static ovp_repaint_fn ovp_ui_repaint = (ovp_repaint_fn)(uintptr_t)VA_REPAINT;
+
+static uint32_t ovp_breath_byte(void)
+{
+    struct timespec ts;
+    uint64_t t;
+    float ph, w, p;
+    int v;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    t = ((uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec) % BREATH_PERIOD_NS;
+    ph = (float)t / (float)BREATH_PERIOD_NS;
+    w = 0.5f - 0.5f * cosf(6.2831853f * ph);
+    p = powf(w, BREATH_SHAPE);
+    v = (int)(powf(p, 2.2f) * 255.0f + 0.5f);
+    if (v < 0) v = 0;
+    if (v > 255) v = 255;
+    return (uint32_t)v;
+}
+
+/* ---- overview-pulse eligibility: ACTIVE flag, not picker arm ----
+ * ActiveLoopBar is the track-overview Active Loop marker:
+ *   - RTTI gui::player_info_waveform::ActiveLoopBar (FIRMWARE-ACTIVELOOP-BAR.md)
+ *   - EP147-ACTIVE-LOOPS.md names it the Active Loop "UI indicator"
+ *   - al0216j WAVEFORM bursts: the only pixels that change are a 2 px column
+ *     at x=582, y=725-768 on Cola's mini overview — the same column as the
+ *     red triangle at ~06:33.5 (the flagged memory loop).
+ * Firmware ActiveLoopUpdater (0x9a2e40) reads MemoryCueSet, picks the cue
+ * with Cue+0x28 / CueProperty+0xe1, and calls CueLoadFacade::updateActiveLoop
+ * without our picker, so the marker can appear when act_ok is 0 (auto-arm
+ * never ran, or the user never used SHIFT+pad / SHIFT+MEMORY).
+ * update() hides the bar when **(ALB+0x58)+0xe0/+0xe8 is INT64_MAX. Runtime
+ * logs of those fields on Cola were 78:415720 (playhead ms : duration ms),
+ * NOT the flagged loop 17354310:18048312, so matching +0xe0/+0xe8 against
+ * cue_in/cue_out cannot be required (it would never fire on Cola). If those
+ * fields DO uniquely match a stored loop that is not flagged, the bar is
+ * showing that loop and must stay solid. SHIFT+DELETE / SHIFT+MEMORY remain
+ * picker features and do not turn the pulse row on or off. */
+static int ovp_ends_visible(int64_t lin, int64_t lout)
+{
+    return lin != INT64_MAX && lout != INT64_MAX;
+}
+
+static int ovp_slot_flagged(int d, int i)
+{
+    if (d < 0 || d >= NDECK || i < 0 || i >= mem_n[d] || !mem_ok[d][i]) return 0;
+    if (mem_flag[d][i]) return 1;
+    return mem_buf[d][i][CP_FLAG] != 0;
+}
+
+static int ovp_deck_has_flagged(int d)
+{
+    int i;
+    if (d < 0 || d >= NDECK) return 0;
+    for (i = 0; i < mem_n[d]; i++)
+        if (ovp_slot_flagged(d, i)) return 1;
+    if (__atomic_load_n(&anlz_state[d], __ATOMIC_ACQUIRE) == 2) {
+        for (i = 0; i < anlz_res[d].n && i < NAL; i++)
+            if (anlz_res[d].e[i].flag) return 1;
+    }
+    return 0;
+}
+
+static int ovp_any_flagged_deck(void)
+{
+    int d;
+    for (d = 0; d < NDECK; d++)
+        if (ovp_deck_has_flagged(d)) return 1;
+    return 0;
+}
+
+static int ovp_matches_flagged_ends(int d, int64_t lin, int64_t lout)
+{
+    int i;
+    if (d < 0 || d >= NDECK || !ovp_ends_visible(lin, lout)) return 0;
+    for (i = 0; i < mem_n[d]; i++) {
+        if (!ovp_slot_flagged(d, i)) continue;
+        if (ovp_ends_eq(lin, lout, cue_in(mem_buf[d][i]), cue_out(mem_buf[d][i])))
+            return 1;
+    }
+    if (__atomic_load_n(&anlz_state[d], __ATOMIC_ACQUIRE) == 2) {
+        for (i = 0; i < anlz_res[d].n && i < NAL; i++) {
+            int64_t a, b;
+            if (!anlz_res[d].e[i].flag) continue;
+            a = (int64_t)anlz_res[d].e[i].in_ms;
+            b = (int64_t)anlz_res[d].e[i].out_ms;
+            if (ovp_ends_eq(lin, lout, a, b)) return 1;
+            if (ovp_ends_eq(lin, lout, (int64_t)(a * 44.1 + 0.5), (int64_t)(b * 44.1 + 0.5)))
+                return 1;
+        }
+    }
+    return 0;
+}
+
+static int __attribute__((unused)) ovp_matches_other_loop_ends(int d, int64_t lin, int64_t lout)
+{
+    int i, k;
+    if (d < 0 || d >= NDECK || !ovp_ends_visible(lin, lout)) return 0;
+    for (i = 0; i < mem_n[d]; i++) {
+        if (!mem_ok[d][i] || ovp_slot_flagged(d, i)) continue;
+        if (ovp_ends_eq(lin, lout, cue_in(mem_buf[d][i]), cue_out(mem_buf[d][i])))
+            return 1;
+    }
+    for (k = 1; k < NHOT; k++) {
+        if (!hot_ok[d][k]) continue;
+        if (ovp_ends_eq(lin, lout, cue_in(hot_buf[d][k]), cue_out(hot_buf[d][k])))
+            return 1;
+    }
+    if (__atomic_load_n(&anlz_state[d], __ATOMIC_ACQUIRE) == 2) {
+        for (i = 0; i < anlz_res[d].n && i < NAL; i++) {
+            int64_t a, b;
+            if (anlz_res[d].e[i].flag) continue;
+            a = (int64_t)anlz_res[d].e[i].in_ms;
+            b = (int64_t)anlz_res[d].e[i].out_ms;
+            if (ovp_ends_eq(lin, lout, a, b)) return 1;
+            if (ovp_ends_eq(lin, lout, (int64_t)(a * 44.1 + 0.5), (int64_t)(b * 44.1 + 0.5)))
+                return 1;
+        }
+    }
+    return 0;
+}
+
+/* Pure: the overview-active loop for this deck.
+ * cleared: SHIFT+pad toggle-off — no mark (do not fall back to the stored flag).
+ * picked && armed && !spent: SHIFT+pad / SHIFT+MEMORY current Active.
+ * otherwise the stored rekordbox/mod flag, if any. */
+static int ovp_current_mark(int picked, int cleared,
+                            int armed, int spent,
+                            int64_t arm_in, int64_t arm_out,
+                            int has_flag, int64_t flag_in, int64_t flag_out,
+                            int64_t *in, int64_t *out)
+{
+    if (cleared) return 0;
+    if (picked && armed && !spent) {
+        if (in) *in = arm_in;
+        if (out) *out = arm_out;
+        return 1;
+    }
+    if (has_flag) {
+        if (in) *in = flag_in;
+        if (out) *out = flag_out;
+        return 1;
+    }
+    return 0;
+}
+
+/* Pure: how to treat stock ActiveLoopBar placement.
+ * 0 = leave stock (flag position, or hidden if no flag).
+ * 1 = move to in/out (live target differs from the stored flag).
+ * 2 = hide (SHIFT+pad unflag or exit with no new live target).
+ * Mode 0 must undo a previous physical override: stock cached X is not bounds. */
+static int ovp_place_mode(int picked, int cleared,
+                          int armed, int spent,
+                          int64_t arm_in, int64_t arm_out,
+                          int has_flag, int64_t flag_in, int64_t flag_out,
+                          int64_t *in, int64_t *out)
+{
+    if (cleared) return 2;
+    if (picked && armed && !spent) {
+        if (!has_flag || !ovp_ends_eq(arm_in, arm_out, flag_in, flag_out)) {
+            if (in) *in = arm_in;
+            if (out) *out = arm_out;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Pure: stock ActiveLoopBar::update X formula (0x1d6c434..0x1d6c480).
+ * denom = **(ALB+0x58)+0xe8 (Cola: 415720 ms duration); pos = player+0x510
+ * (the marker time, same units). X = origin + width * (pos/denom) when
+ * denom > pos; origin if denom <= 0; origin+width if 0 < denom <= pos. */
+static int ovp_mark_x(int origin, int width, int64_t pos, int64_t denom)
+{
+    float s2;
+    int x;
+    if (denom <= 0) return origin;
+    if (denom <= pos) return origin + width;
+    s2 = (float)width * ((float)pos / (float)denom);
+    x = (int)((float)origin + s2);
+    if (x < 0) x = 0;
+    return x;
+}
+
+/* Map loop-in samples onto denom's unit. denom < 10e6 looks like milliseconds
+ * (Cola +0xe8 = 415720); otherwise treat both as cue samples. */
+static int64_t ovp_pos_for_denom(int64_t loop_in_samples, int64_t denom)
+{
+    if (denom > 0 && denom < 10000000LL)
+        return (int64_t)((double)loop_in_samples / 44.1 + (loop_in_samples >= 0 ? 0.5 : -0.5));
+    return loop_in_samples;
+}
+
+/* Pure: should this visible ActiveLoopBar breathe?
+ * vis: +0xe0/+0xe8 are not the hidden sentinel (firmware can show the bar).
+ * has_flagged: this deck has a CURRENT overview-active loop (SHIFT+pad pick,
+ *   else the stored flag; 0 after SHIFT+pad unflag even if a rekordbox flag remains).
+ * ends_hit_flagged: ALB extents match that current loop (when the fields
+ *   really are loop in/out).
+ * ends_hit_other: ALB extents match a stored loop that is not the current one.
+ * Load-time flag is independent of act_ok/spent; a user pick overrides it. */
+static int ovp_flagged_eligible(int vis, int has_flagged, int ends_hit_flagged, int ends_hit_other)
+{
+    if (!vis || !has_flagged) return 0;
+    if (ends_hit_flagged) return 1;
+    if (ends_hit_other) return 0;
+    return 1;
+}
+
+static int ovp_deck_flag_ends(int d, int64_t *in, int64_t *out)
+{
+    int i;
+    if (d < 0 || d >= NDECK || !in || !out) return 0;
+    for (i = 0; i < mem_n[d]; i++) {
+        if (!ovp_slot_flagged(d, i)) continue;
+        *in = cue_in(mem_buf[d][i]);
+        *out = cue_out(mem_buf[d][i]);
+        return 1;
+    }
+    if (__atomic_load_n(&anlz_state[d], __ATOMIC_ACQUIRE) == 2) {
+        for (i = 0; i < anlz_res[d].n && i < NAL; i++) {
+            if (!anlz_res[d].e[i].flag) continue;
+            *in = (int64_t)(anlz_res[d].e[i].in_ms * 44.1 + 0.5);
+            *out = (int64_t)(anlz_res[d].e[i].out_ms * 44.1 + 0.5);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int ovp_deck_current_ends(int d, int64_t *in, int64_t *out)
+{
+    int64_t fin = 0, fout = 0;
+    int has;
+    if (d < 0 || d >= NDECK) return 0;
+    has = ovp_deck_flag_ends(d, &fin, &fout);
+    return ovp_current_mark(ovp_sess[d] == OVP_SESS_PICKED,
+                            ovp_sess[d] == OVP_SESS_CLEARED,
+                            act_ok[d], spent[d],
+                            active_in[d], active_out[d],
+                            has, fin, fout, in, out);
+}
+
+static int ovp_deck_place_mode(int d, int64_t *in, int64_t *out)
+{
+    int64_t fin = 0, fout = 0;
+    int has;
+    if (d < 0 || d >= NDECK) return 0;
+    has = ovp_deck_flag_ends(d, &fin, &fout);
+    return ovp_place_mode(ovp_sess[d] == OVP_SESS_PICKED,
+                          ovp_sess[d] == OVP_SESS_CLEARED,
+                          act_ok[d], spent[d],
+                          active_in[d], active_out[d],
+                          has, fin, fout, in, out);
+}
+
+static int ovp_any_current_deck(void)
+{
+    int d;
+    int64_t in = 0, out = 0;
+    for (d = 0; d < NDECK; d++)
+        if (ovp_deck_current_ends(d, &in, &out)) return 1;
+    return 0;
+}
+
+static int ovp_alb_is_flagged_marker(int d, uintptr_t alb)
+{
+    int64_t lin = 0, lout = 0, cin = 0, cout = 0;
+    int vis, has;
+    if (d < 0 || d >= NDECK || !alb) return 0;
+    vis = (ovp_loop_ends(alb, &lin, &lout) == 0 && ovp_ends_visible(lin, lout));
+    has = ovp_deck_current_ends(d, &cin, &cout);
+    /* +0xe0/+0xe8 are stock visibility/time fields, not cue extents.
+     * Placement and pulse must use the SAME current mark; a coincidental
+     * match against another cached loop must not suppress its breath. */
+    return ovp_flagged_eligible(vis, has, 0, 0);
+}
+
+/* Opt-in diagnostic: called only by existing Overview logging, <=1 Hz/bar,
+ * change-only semantic signature (not brightness), no logs in paint/update. */
+struct ovp_gate_diag {
+    uintptr_t alb;
+    int deck, allowed, live, fresh, mark, eligible, place, sess;
+    int64_t in, out;
+};
+static struct ovp_gate_diag ovp_gate_diag[OVP_SLOTS];
+static void ovp_log_gate_reset(void)
+{
+    memset(ovp_gate_diag, 0, sizeof ovp_gate_diag);
+}
+static void ovp_log_gate(uintptr_t alb, int deck, const char *how, uint64_t now)
+{
+    struct ovp_gate_diag cur;
+    int i, slot = -1, free_i = -1;
+    int64_t in = 0, out = 0;
+    if (!alb) return;
+    memset(&cur, 0, sizeof cur);
+    cur.alb = alb; cur.deck = deck;
+    cur.allowed = deck >= 0 && deck < NDECK && ovp_colour_allowed(how);
+    cur.live = ovp_bar_is_live(deck, alb + ALB_BAR_OFF);
+    for (i = 0; i < OVP_SLOTS; i++)
+        if (__atomic_load_n(&ovp_upd_ptr[i], __ATOMIC_RELAXED) == alb) {
+            slot = i;
+            cur.fresh = ovp_upd_fresh(__atomic_load_n(&ovp_upd_seen[i], __ATOMIC_RELAXED), now);
+            break;
+        }
+    cur.mark = ovp_deck_current_ends(deck, &cur.in, &cur.out);
+    cur.eligible = ovp_alb_is_flagged_marker(deck, alb);
+    cur.place = ovp_deck_place_mode(deck, &in, &out);
+    cur.sess = deck >= 0 && deck < NDECK ? ovp_sess[deck] : -1;
+    for (i = 0; i < OVP_SLOTS; i++) {
+        if (ovp_gate_diag[i].alb == alb) break;
+        if (free_i < 0 && !ovp_gate_diag[i].alb) free_i = i;
+    }
+    if (i == OVP_SLOTS) i = free_i >= 0 ? free_i : 0;
+    const struct ovp_gate_diag *prev = &ovp_gate_diag[i];
+    if (prev->alb == cur.alb && prev->deck == cur.deck && prev->allowed == cur.allowed &&
+        prev->live == cur.live && prev->fresh == cur.fresh &&
+        prev->mark == cur.mark && prev->eligible == cur.eligible &&
+        prev->place == cur.place && prev->sess == cur.sess &&
+        prev->in == cur.in && prev->out == cur.out) return;
+    ovp_gate_diag[i] = cur;
+    LOG("overview-pulse: gate alb=%p deck=%s via=%s slot=%d allowed=%d live=%d fresh=%d mark=%d eligible=%d place=%d sess=%d target=%lld:%lld slots=%d drops=%u",
+        (void *)alb, ovp_deck_txt(deck), how, slot, cur.allowed, cur.live, cur.fresh,
+        cur.mark, cur.eligible, cur.place, cur.sess, (long long)cur.in, (long long)cur.out,
+        OVP_SLOTS, __atomic_load_n(&ovp_note_dropped, __ATOMIC_RELAXED));
+}
+
+/* Picker arm state. Not the overview-pulse gate (kept so host tests can
+ * show act_ok && !spent is independent of the breath). */
+static int ovp_deck_armed(int d) __attribute__((unused));
+static int ovp_deck_armed(int d)
+{
+    return d >= 0 && d < NDECK && act_ok[d] && !spent[d];
+}
+
+#define OVP_PX_TRACK OVP_SLOTS
+static uintptr_t ovp_px_alb[OVP_PX_TRACK];
+static int       ovp_px_x[OVP_PX_TRACK];
+static uint32_t  ovp_px_gen[OVP_PX_TRACK];
+static uintptr_t ovp_bound_alb[OVP_PX_TRACK];
+static int8_t    ovp_bound_deck[OVP_PX_TRACK];
+
+typedef void (*ovp_move_fn)(void *comp, int x, int y);
+static ovp_move_fn ovp_ui_move = (ovp_move_fn)(uintptr_t)VA_BAR_MOVE;
+typedef void (*ovp_vis_fn)(void *iface, int vis);
+
+/* Same fresh identity used by pulse/live selection; never cache just ALB*. */
+static int ovp_deck_fast(uintptr_t alb)
+{
+    const char *how = "none";
+    int d = ovp_deck_structural(alb, &how);
+    if (alb) ovp_rebind_bar(alb, d);
+    return d;
+}
+
+static void ovp_alb_set_visible(uintptr_t alb, int vis)
+{
+    uintptr_t vt = 0, off = 0, ivt = 0, slot = 0;
+    if (safe_read(alb, &vt, 8) != 0 || vt != VT_ALB) return;
+    if (safe_read(vt - 0x18, &off, 8) != 0 || off == 0 || off > 0x400) return;
+    if (safe_read(alb + off, &ivt, 8) != 0 || ivt < 0x10000) return;
+    if (safe_read(ivt + 0x60, &slot, 8) != 0 || slot < 0x10000) return;
+    ((ovp_vis_fn)slot)((void *)(alb + off), vis);
+}
+
+static void ovp_alb_move_bar(uintptr_t alb, int x)
+{
+    uintptr_t bar = alb + ALB_BAR_OFF, vt = 0, comp;
+    uint32_t w = 0;
+    int left;
+    if (safe_read(bar, &vt, 8) != 0 || vt != VT_BAR) return;
+    comp = bar + BAR_COMPONENT_OFF;
+    if (safe_read(comp + 0x28, &w, 4) != 0) return;
+    left = x - ((int)w >> 1);          /* stock: x - (width >> 1) for w >= 0 */
+    ovp_ui_move((void *)comp, left, 0);
+}
+
+static int ovp_px_cached(uintptr_t alb, uint32_t gen)
+{
+    int i;
+    for (i = 0; i < OVP_PX_TRACK; i++)
+        if (ovp_px_alb[i] == alb && ovp_px_gen[i] == gen) return ovp_px_x[i];
+    return INT32_MIN;
+}
+
+static void ovp_px_store(uintptr_t alb, int x, uint32_t gen)
+{
+    int i, free_i = -1;
+    for (i = 0; i < OVP_PX_TRACK; i++) {
+        if (ovp_px_alb[i] == alb) { ovp_px_x[i] = x; ovp_px_gen[i] = gen; return; }
+        if (free_i < 0 && ovp_px_alb[i] == 0) free_i = i;
+    }
+    if (free_i < 0) free_i = 0;
+    ovp_px_alb[free_i] = alb;
+    ovp_px_x[free_i] = x;
+    ovp_px_gen[free_i] = gen;
+}
+
+/* An override deliberately leaves Bar+0x34 at stock X. Returning to stock
+ * MUST physically restore that coordinate, even though stock sees no change.
+ * Pure helper shared by the hook and host transition tests. */
+static int ovp_place_destination(int mode, int overridden, int stock_x, int mark_x,
+                                 int *destination)
+{
+    if (mode == 2 || (mode == 0 && !overridden)) return 0;
+    *destination = mode == 0 ? stock_x : mark_x;
+    return 1;
+}
+
+static int ovp_px_overridden(uintptr_t alb)
+{
+    int i;
+    for (i = 0; i < OVP_PX_TRACK; i++)
+        if (ovp_px_alb[i] == alb) return 1;
+    return 0;
+}
+
+static void ovp_px_forget(uintptr_t alb)
+{
+    int i;
+    for (i = 0; i < OVP_PX_TRACK; i++)
+        if (ovp_px_alb[i] == alb) ovp_px_alb[i] = 0;
+}
+
+/* After orig_update: hide, or move the bar to the current Active Loop and
+ * write stock X back to Bar+0x34 so the next orig_update does not fight
+ * (recompute stock X == cached, skip its 40-60/s move+repaint). */
+static void ovp_alb_apply_place(void *self)
+{
+    uintptr_t alb = (uintptr_t)self, vp = 0;
+    int d, mode, our_x, cached;
+    int64_t cin = 0, cout = 0, lin = 0, lout = 0, denom, pos;
+    uint32_t width = 0, origin = 0, stock_x = 0, gen;
+    if (!alb) return;
+    if (safe_read(alb, &vp, 8) != 0 || vp != VT_ALB) return;
+    d = ovp_deck_fast(alb);
+    if (d < 0) return;
+    mode = ovp_deck_place_mode(d, &cin, &cout);
+    if (mode == 0) {
+        int destination;
+        if (!ovp_px_overridden(alb)) return;
+        if (safe_read(alb + ALB_BAR_OFF + BAR_X_OFF, &stock_x, 4) != 0) return;
+        if (ovp_place_destination(mode, 1, (int)stock_x, 0, &destination)) {
+            ovp_suppress_bar_until(alb + ALB_BAR_OFF, now_ns());
+            ovp_alb_move_bar(alb, destination);
+            /* JUCE move invalidates old and new bounds; no extra repaint. */
+            ovp_px_forget(alb);
+        }
+        return;
+    }
+    if (mode == 2) {
+        ovp_alb_set_visible(alb, 0);
+        return;
+    }
+    if (ovp_loop_ends(alb, &lin, &lout) != 0 || !ovp_ends_visible(lin, lout))
+        return;
+    denom = lout;
+    pos = ovp_pos_for_denom(cin, denom);
+    if (safe_read(alb + ALB_WIDTH_OFF, &width, 4) != 0) return;
+    if (safe_read(alb + ALB_ORIGIN_OFF, &origin, 4) != 0) return;
+    our_x = ovp_mark_x((int)origin, (int)width, pos, denom);
+    if (safe_read(alb + ALB_BAR_OFF + BAR_X_OFF, &stock_x, 4) != 0) return;
+    gen = __atomic_load_n(&ovp_sess_gen, __ATOMIC_RELAXED);
+    cached = ovp_px_cached(alb, gen);
+    if (cached != our_x) {
+        int destination;
+        ovp_place_destination(mode, ovp_px_overridden(alb), (int)stock_x, our_x, &destination);
+        ovp_suppress_bar_until(alb + ALB_BAR_OFF, now_ns());
+        ovp_alb_move_bar(alb, destination);
+        ovp_ui_repaint((void *)(alb + ALB_BAR_OFF + BAR_COMPONENT_OFF));
+        ovp_px_store(alb, our_x, gen);
+    }
+    /* Lie about cached X so stock update thinks it is already at the flag. */
+    *(volatile uint32_t *)(alb + ALB_BAR_OFF + BAR_X_OFF) = stock_x;
+}
+
+/* Lifetime check at use: vtable still Bar, colour word readable, Component
+ * subobject still looks like a juce Component (parent pointer at +0x70 either
+ * null/small or a plausible heap pointer). Stale retained slots are dropped. */
+static int ovp_bar_alive(uintptr_t bar)
+{
+    uintptr_t vp = 0, parent = 0;
+    uint32_t live = 0;
+    if (!bar || bar < 0x10000) return 0;
+    if (safe_read(bar, &vp, 8) != 0 || vp != VT_BAR) return 0;
+    if (safe_read(bar + BAR_COLOUR_OFF, &live, 4) != 0) return 0;
+    if (safe_read(bar + BAR_COMPONENT_OFF + COMP_PARENT_OFF, &parent, 8) != 0)
+        return 0;
+    if (parent != 0 && parent < 0x10000) return 0;
+    if (parent >= ((uintptr_t)1 << 48)) return 0;
+    (void)live;
+    return 1;
+}
+
+/* Per-Bar repaint ledger (dedup paint vs update paths; hard time cap). */
+#define OVP_REP_TRACK OVP_SLOTS
+static uintptr_t ovp_rep_bar[OVP_REP_TRACK];
+static uint64_t  ovp_rep_ns[OVP_REP_TRACK];
+static uint32_t  ovp_rep_col[OVP_REP_TRACK];
+static uint8_t   ovp_rep_mut[OVP_REP_TRACK]; /* row-off: only restore these */
+static uint8_t   ovp_rep_rebind[OVP_REP_TRACK]; /* one solid pass before new owner breathes */
+static uint32_t  ovp_n_colour_writes, ovp_n_repaints; /* tick totals for short log */
+static uint64_t  ovp_live_refresh_ns; /* last refresh; 0 = never */
+
+static int ovp_rep_slot(uintptr_t bar)
+{
+    int i, free_i = -1;
+    for (i = 0; i < OVP_REP_TRACK; i++) {
+        if (ovp_rep_bar[i] == bar) return i;
+        if (free_i < 0 && ovp_rep_bar[i] == 0) free_i = i;
+    }
+    if (free_i < 0) free_i = 0;
+    ovp_rep_bar[free_i] = bar;
+    ovp_rep_ns[free_i] = 0;
+    ovp_rep_col[free_i] = 0;
+    ovp_rep_mut[free_i] = 0;
+    ovp_rep_rebind[free_i] = 0;
+    return free_i;
+}
+
+/* Ownership observer, UI thread only (placement update / tick). On a reused
+ * widget, clear the old deck's sticky selection and invalidate only that bar's
+ * placement cache. Keep stock-restore evidence and repaint deadline intact.
+ * Actual solid restore is on the <=10 Hz mutate pass, never in this observer. */
+static void ovp_rebind_bar(uintptr_t alb, int deck)
+{
+    int i, free_i = -1, old, r;
+    uintptr_t bar = alb + ALB_BAR_OFF;
+    for (i = 0; i < OVP_PX_TRACK; i++) {
+        if (ovp_bound_alb[i] == alb) break;
+        if (free_i < 0 && !ovp_bound_alb[i]) free_i = i;
+    }
+    if (i == OVP_PX_TRACK) {
+        if (free_i < 0) free_i = 0;
+        ovp_bound_alb[free_i] = alb;
+        ovp_bound_deck[free_i] = (int8_t)deck;
+        return;
+    }
+    old = ovp_bound_deck[i];
+    if (old == deck) return;
+    ovp_bound_deck[i] = (int8_t)deck;
+    for (i = 0; i < NDECK; i++)
+        if (__atomic_load_n(&ovp_live_bar[i], __ATOMIC_RELAXED) == bar)
+            __atomic_store_n(&ovp_live_bar[i], 0, __ATOMIC_RELAXED);
+    for (i = 0; i < OVP_PX_TRACK; i++)
+        if (ovp_px_alb[i] == alb) ovp_px_gen[i] = ~ovp_sess_gen;
+    for (i = 0; i < OVP_SLOTS; i++)
+        if (__atomic_load_n(&ovp_paint_ptr[i], __ATOMIC_RELAXED) == bar)
+            __atomic_store_n(&ovp_paint_seen[i], 0, __ATOMIC_RELAXED);
+    /* Retain suppress window: queued paints from the previous layer must not
+     * become organic paint evidence for the new layer. Update freshness wins. */
+    r = ovp_rep_find(ovp_rep_bar, OVP_REP_TRACK, bar);
+    if (r >= 0 && ovp_rep_mut[r]) ovp_rep_rebind[r] = 1;
+    (void)old; /* diagnosis comes from change-only tick log, never this hook */
+}
+
+/* Colour is sampled on the <=10 Hz mutate pass; repaint is HARD-capped at
+ * OVP_REPAINT_MIN_NS per Bar address (live!=want must not bypass the cap).
+ * force_repaint=1 for row-off / disarm restore so solid red is shown immediately. */
+static int ovp_paint_one(uintptr_t bar, uint32_t want, uint64_t now, int force_repaint)
+{
+    uint32_t live = 0;
+    int s;
+    if (!ovp_bar_alive(bar)) return 0;
+    if (safe_read(bar + BAR_COLOUR_OFF, &live, 4) != 0) return 0;
+    s = ovp_rep_slot(bar);
+    if (live != want) {
+        *(volatile uint32_t *)(bar + BAR_COLOUR_OFF) = want;
+        __atomic_add_fetch(&ovp_n_colour_writes, 1u, __ATOMIC_RELAXED);
+        ovp_rep_col[s] = want;
+    }
+    if (ovp_repaint_due(ovp_rep_ns[s], now, force_repaint)) {
+        ovp_repaint_fn rp = ovp_ui_repaint;
+        /* Mark BEFORE schedule: paint may run on this thread or later via juce queue. */
+        ovp_suppress_bar_until(bar, now);
+        rp((void *)(bar + BAR_COMPONENT_OFF));
+        ovp_rep_ns[s] = now;
+        __atomic_add_fetch(&ovp_n_repaints, 1u, __ATOMIC_RELAXED);
+    }
+    ovp_rep_mut[s] = 1;
+    return 1;
+}
+
+/* ActiveLoopBar slots ONLY. Embedded Bar = alb+0x68 after VT_ALB. No generic-Bar
+ * fallback. On-screen = ovp_live_bar[deck] from newest fresh ActiveLoopBar::update
+ * (organic paint tie-break; our repaints suppressed). Idle SOURCE/waveform with
+ * stale updates stays solid / is restored; visible pause still updates so it
+ * breathes at 0 paint/s. Non-live mutated bars → solid. */
+static void ovp_mutate_alb_slots(uint32_t want_armed, uint32_t want_idle,
+                                 int force_solid, uint64_t now)
+{
+    int i;
+    if (!force_solid) {
+        ovp_refresh_live_bars(now);
+        ovp_live_refresh_ns = now;
+    }
+    if (!ovp_mutate_work_pending(ovp_any_ptr(ovp_upd_ptr, OVP_SLOTS),
+                                 ovp_any_current_deck() || ovp_any_flagged_deck(),
+                                 ovp_any_ptr(ovp_live_bar, NDECK),
+                                 ovp_any_u8(ovp_rep_mut, OVP_REP_TRACK),
+                                 force_solid))
+        return;
+    for (i = 0; i < OVP_SLOTS; i++) {
+        uintptr_t p = __atomic_load_n(&ovp_upd_ptr[i], __ATOMIC_RELAXED);
+        uintptr_t alb, bar, vp = 0;
+        const char *how = "none";
+        int deck, rs, is_live;
+        uint32_t want;
+        if (!p) continue;
+        if (safe_read(p, &vp, 8) != 0 || vp != VT_ALB) {
+            __atomic_store_n(&ovp_upd_ptr[i], 0, __ATOMIC_RELAXED);
+            continue;
+        }
+        alb = ovp_alb_of(p, 1);
+        if (!alb) {
+            __atomic_store_n(&ovp_upd_ptr[i], 0, __ATOMIC_RELAXED);
+            continue; /* no generic Bar path */
+        }
+        bar = alb + ALB_BAR_OFF;
+        deck = ovp_deck_resolve(p, 1, &how);
+        rs = ovp_rep_slot(bar);
+        if (!ovp_bar_alive(bar)) {
+            int si;
+            if (deck >= 0 &&
+                __atomic_load_n(&ovp_live_bar[deck], __ATOMIC_RELAXED) == bar)
+                __atomic_store_n(&ovp_live_bar[deck], 0, __ATOMIC_RELAXED);
+            for (si = 0; si < OVP_SUP_TRACK; si++)
+                if (ovp_sup_bar[si] == bar) {
+                    ovp_sup_bar[si] = 0;
+                    ovp_sup_until[si] = 0;
+                }
+            __atomic_store_n(&ovp_upd_ptr[i], 0, __ATOMIC_RELAXED);
+            ovp_rep_mut[rs] = 0;
+            continue;
+        }
+        is_live = ovp_bar_is_live(deck, bar);
+        if (!force_solid && ovp_rep_rebind[rs]) {
+            if (ovp_paint_one(bar, want_idle, now, 0)) {
+                ovp_rep_rebind[rs] = 0;
+                ovp_rep_mut[rs] = 0;
+            }
+            continue; /* new owner may breathe on the next <=10 Hz pass */
+        }
+        if (force_solid) {
+            if (!ovp_rep_mut[rs]) continue;
+            if (!ovp_paint_one(bar, want_idle, now, 1)) {
+                __atomic_store_n(&ovp_upd_ptr[i], 0, __ATOMIC_RELAXED);
+                ovp_rep_mut[rs] = 0;
+                ovp_rep_bar[rs] = 0;
+                continue;
+            }
+            ovp_rep_mut[rs] = 0;
+            continue;
+        }
+        if (!ovp_should_mutate(deck, how, 0, 0, is_live,
+                                 ovp_upd_fresh(__atomic_load_n(&ovp_upd_seen[i], __ATOMIC_RELAXED), now))) {
+            if (ovp_rep_mut[rs] && ovp_colour_allowed(how) && deck >= 0) {
+                if (ovp_paint_one(bar, want_idle, now, 1))
+                    ovp_rep_mut[rs] = 0;
+                else {
+                    __atomic_store_n(&ovp_upd_ptr[i], 0, __ATOMIC_RELAXED);
+                    ovp_rep_mut[rs] = 0;
+                    ovp_rep_bar[rs] = 0;
+                }
+            }
+            continue;
+        }
+        /* Current Active Loop marker breathes (SHIFT+pad pick or stored flag). */
+        want = ovp_alb_is_flagged_marker(deck, alb) ? want_armed : want_idle;
+        if (!ovp_paint_one(bar, want, now, 0)) {
+            __atomic_store_n(&ovp_upd_ptr[i], 0, __ATOMIC_RELAXED);
+            ovp_rep_mut[rs] = 0;
+            ovp_rep_bar[rs] = 0;
+            if (__atomic_load_n(&ovp_live_bar[deck], __ATOMIC_RELAXED) == bar)
+                __atomic_store_n(&ovp_live_bar[deck], 0, __ATOMIC_RELAXED);
+        }
+    }
+}
+
+static void ovp_mutate_tick(uint32_t cf)
+{
+    static int was_on, init_done;
+    static uint64_t log_t0, last_mutate_ns, on_ns;
+    static uint32_t ticks_since_on;
+    uint64_t now;
+    uint32_t lvl, armed_col, nw, nr;
+    int on = (cf & CFG_OVPULSE) != 0 && (cf & CFG_ENABLE) != 0;
+    if (!on) {
+        if (was_on) {
+            now = now_ns();
+            ovp_mutate_alb_slots(OVP_SOLID_RED, OVP_SOLID_RED, 1, now);
+            memset(ovp_live_bar, 0, sizeof ovp_live_bar);
+            memset(ovp_sup_bar, 0, sizeof ovp_sup_bar);
+            memset(ovp_sup_until, 0, sizeof ovp_sup_until);
+            ovp_live_refresh_ns = 0;
+            LOG("overview-pulse: colour OFF (restored solid red on mutated ActiveLoopBars only)");
+        }
+        was_on = 0;
+        init_done = 0;
+        log_t0 = last_mutate_ns = on_ns = 0;
+        ticks_since_on = 0;
+        return;
+    }
+    if (!was_on) {
+        /* Detect ON on the menu-tap tick: no memset, log, or resolve here. */
+        was_on = 1;
+        init_done = 0;
+        on_ns = now_ns();
+        ticks_since_on = 0;
+        last_mutate_ns = 0;
+        return;
+    }
+    ticks_since_on++;
+    now = now_ns();
+    if (!init_done) {
+        if (!ovp_on_edge_ready(on_ns, now, ticks_since_on,
+                               OVP_MUTATE_ON_MIN_TICKS, OVP_MUTATE_ON_DEFER_NS))
+            return;
+        memset(ovp_rep_bar, 0, sizeof ovp_rep_bar);
+        memset(ovp_rep_ns, 0, sizeof ovp_rep_ns);
+        memset(ovp_rep_mut, 0, sizeof ovp_rep_mut);
+        memset(ovp_rep_rebind, 0, sizeof ovp_rep_rebind);
+        memset(ovp_live_bar, 0, sizeof ovp_live_bar);
+        memset(ovp_sup_bar, 0, sizeof ovp_sup_bar);
+        memset(ovp_sup_until, 0, sizeof ovp_sup_until);
+        ovp_live_refresh_ns = 0;
+        __atomic_store_n(&ovp_n_colour_writes, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&ovp_n_repaints, 0u, __ATOMIC_RELAXED);
+        LOG("overview-pulse: colour ON (live=newest update within 0.5s; organic paint tie-break; deferred our-repaint suppressed 150ms/Bar; flagged ACTIVE loop, not picker arm; mutate <=10/s; ON-edge deferred)");
+        init_done = 1;
+        last_mutate_ns = 0;
+        return; /* spread: init this tick, first mutate on a later due tick */
+    }
+    if (!ovp_mutate_due(last_mutate_ns, now))
+        return;
+    last_mutate_ns = now;
+    lvl = ovp_breath_byte();
+    armed_col = 0xff000000u | (lvl << 16);
+    ovp_mutate_alb_slots(armed_col, OVP_SOLID_RED, 0, now);
+    if (!log_t0) log_t0 = now;
+    if (now - log_t0 >= 60000000000ull) {
+        nw = __atomic_exchange_n(&ovp_n_colour_writes, 0u, __ATOMIC_RELAXED);
+        nr = __atomic_exchange_n(&ovp_n_repaints, 0u, __ATOMIC_RELAXED);
+        LOG("overview-pulse: 60s colour_writes=%u repaints=%u", nw, nr);
+        log_t0 = now;
+    }
+}
+
+/* Rate-limited: poll for signature changes every 1 s; rate summary + forced
+ * slot dump every 5 s. Colour writes live in ovp_mutate_tick, not here. */
+static void ovp_flush_log(uint32_t cf)
+{
+    static int was_on, on_pending;
+    static uint64_t poll_t0, beat_t0, on_ns;
+    static uint32_t ticks_since_on;
+    uint64_t now, dt;
+    uint32_t pt, ut;
+    int on = (cf & CFG_OVPULSE) != 0;
+    int heartbeat;
+    if (on && !was_on) {
+        /* Menu-tap tick: defer memset + LOG so it is not bundled with the tap. */
+        was_on = 1;
+        on_pending = 1;
+        on_ns = now_ns();
+        ticks_since_on = 0;
+        return;
+    }
+    if (!on) {
+        if (was_on) LOG("overview-pulse: logging OFF");
+        was_on = 0;
+        on_pending = 0;
+        poll_t0 = beat_t0 = on_ns = 0;
+        ticks_since_on = 0;
+        return;
+    }
+    was_on = 1;
+    now = now_ns();
+    if (on_pending) {
+        ticks_since_on++;
+        if (!ovp_on_edge_ready(on_ns, now, ticks_since_on,
+                               OVP_LOG_ON_MIN_TICKS, OVP_LOG_ON_DEFER_NS))
+            return;
+        memset(ovp_seen, 0, sizeof ovp_seen);
+        ovp_log_gate_reset();
+        LOG("overview-pulse: logging ON (change-only slots + 60 s rate line)");
+        on_pending = 0;
+        poll_t0 = beat_t0 = now;
+        return; /* do not also dump slots on the log-ON tick */
+    }
+    if (!poll_t0) poll_t0 = now;
+    if (!beat_t0) beat_t0 = now;
+    if (now - poll_t0 < 1000000000ull) return; /* once a second, not every tick */
+    poll_t0 = now;
+    heartbeat = (now - beat_t0 >= OVP_HEARTBEAT_NS);
+    if (!heartbeat) {
+        ovp_log_slots("Bar", ovp_paint_ptr, ovp_paint_col, ovp_paint_n, VT_BAR, BAR_COLOUR_OFF, 0, 0, now);
+        ovp_log_slots("ActiveLoopBar", ovp_upd_ptr, ovp_upd_col, ovp_upd_n, VT_ALB, ALB_COLOUR_OFF, 1, 0, now);
+        return;
+    }
+    dt = now - beat_t0;
+    beat_t0 = now;
+    pt = __atomic_exchange_n(&ovp_paint_total, 0u, __ATOMIC_RELAXED);
+    ut = __atomic_exchange_n(&ovp_upd_total, 0u, __ATOMIC_RELAXED);
+    /* Heartbeat: one rate line only. Slot lines stay change-only (al0216c ~17 KB/min with 5 s dumps). */
+    LOG("overview-pulse: %.1fs paint=%u (%.0f/s) update=%u (%.0f/s) [pulse row on] slots=%d drops=%u",
+        (double)dt / 1e9, pt, (double)pt * 1e9 / (double)dt,
+        ut, (double)ut * 1e9 / (double)dt, OVP_SLOTS,
+        __atomic_load_n(&ovp_note_dropped, __ATOMIC_RELAXED));
+    ovp_log_slots("Bar", ovp_paint_ptr, ovp_paint_col, ovp_paint_n, VT_BAR, BAR_COLOUR_OFF, 0, 0, now);
+    ovp_log_slots("ActiveLoopBar", ovp_upd_ptr, ovp_upd_col, ovp_upd_n, VT_ALB, ALB_COLOUR_OFF, 1, 0, now);
+}
+
 static void my_tick(void)
 {
     tick_no++;
@@ -3676,6 +5381,10 @@ static void my_tick(void)
         drop_ring();
         (void)__atomic_exchange_n(&deck_evt, 0, __ATOMIC_RELAXED);
         poll_filter();                       /* side / press bookkeeping only: it is silent while off */
+        ovp_flush_log(cf0);
+#if AL_OVERVIEW_PULSE_MUTATE
+        ovp_mutate_tick(cf0);
+#endif
         pend_service();                      /* applies the one clear queued above, silently */
         pj_service();                        /* 0.2.9: a persist pair already started is finished (never half a delete + store) */
         __atomic_store_n(&led_pub[0], 0u, __ATOMIC_RELAXED); __atomic_store_n(&led_pub[1], 0u, __ATOMIC_RELAXED);
@@ -3703,6 +5412,10 @@ static void my_tick(void)
     anlz_service();
     led_refresh();
     led_level_update(cf0);
+    ovp_flush_log(cf0);
+#if AL_OVERVIEW_PULSE_MUTATE
+    ovp_mutate_tick(cf0);
+#endif
     timing_log();
     for (int d = 0; d < NDECK; d++) {
         __atomic_store_n(&hold_pub[d], holder_of(d), __ATOMIC_RELAXED);
@@ -3809,7 +5522,45 @@ static int claim_all(void)
         LOG("claim_hook deleteCue refused (observer off; loop list is refreshed from the live slots)");
         orig_delete = NULL;
     } else LOG("deleteCue observer installed at %#lx (never swallows)", (unsigned long)VA_DELETE);
+
+    /* 0.2.16: overview probe is optional. A refused claim leaves 0.2.15 behaviour intact. */
+    orig_bar_paint = NULL;
+    orig_alb_update = NULL;
+    {
+        uint32_t ins[4];
+        int paint_ok = target_ok(VA_BAR_PAINT, "Bar::paint") &&
+            safe_read(VA_BAR_PAINT, ins, sizeof ins) == 0 &&
+            ins[0] == OVP_PROLOG0 && ins[1] == OVP_PROLOG1 && ins[2] == OVP_PROLOG2 && ins[3] == OVP_PROLOG3;
+        if (!paint_ok) {
+            LOG("overview-pulse: Bar::paint %#lx prologue mismatch or unreadable; not claimed",
+                (unsigned long)VA_BAR_PAINT);
+        } else if (C->claim_hook(MOD_ID, VA_BAR_PAINT, (void *)my_bar_paint, (void **)&orig_bar_paint) != 0) {
+            LOG("overview-pulse: claim_hook paint %#lx refused (probe off)", (unsigned long)VA_BAR_PAINT);
+            orig_bar_paint = NULL;
+        } else {
+            LOG("overview-pulse: paint hook at %#lx (log-only)", (unsigned long)VA_BAR_PAINT);
+        }
+        int upd_ok = target_ok(VA_ALB_UPDATE, "ActiveLoopBar::update") &&
+            safe_read(VA_ALB_UPDATE, ins, sizeof ins) == 0 &&
+            ins[0] == OVP_PROLOG0 && ins[1] == OVP_PROLOG1 && ins[2] == OVP_PROLOG2 && ins[3] == OVP_PROLOG3;
+        if (!upd_ok) {
+            LOG("overview-pulse: ActiveLoopBar::update %#lx prologue mismatch or unreadable; not claimed",
+                (unsigned long)VA_ALB_UPDATE);
+        } else if (C->claim_hook(MOD_ID, VA_ALB_UPDATE, (void *)my_alb_update, (void **)&orig_alb_update) != 0) {
+            LOG("overview-pulse: claim_hook update %#lx refused (probe off)", (unsigned long)VA_ALB_UPDATE);
+            orig_alb_update = NULL;
+        } else {
+            LOG("overview-pulse: update hook at %#lx (log-only)", (unsigned long)VA_ALB_UPDATE);
+        }
+    }
     return 0;
+}
+
+static int ovpulse_available(void *user)
+{
+    (void)user;
+    if (!C || !AZ_HAS(C, row_value) || h_enable < 0) return 1;
+    return C->row_value(h_enable) == 1;
 }
 
 static int init(const az_core_v1 *core)
@@ -3885,6 +5636,18 @@ static int init(const az_core_v1 *core)
             .on_change = row_changed, .user = (void *)"Pop-up messages",
         };
         h_popups = C->register_row(MOD_ID, &po);
+        const az_row_v1 ov = {
+            .size = sizeof ov, .key = "overview-pulse", .label = "Pulse overview marker",
+            .kind = AZ_ROW_TOGGLE, .flags = 0, .parent = NULL,
+            /* Top-level on purpose: a fifth OPTIONS child under enable overflows the
+             * right pane (4 children fit, 5 sit under the waveform). al0216a: one tap
+             * at (2475,1390) hit both Pop-up messages and this row. available() grays
+             * it while Active Loop is off, matching the old parent="enable" inertness. */
+            .help = "Track-overview marker at an ACTIVE Memory/Cue loop breathes red (4 s). Menu only, no key combo. Default off. Grayed while Active Loop is off. Jog screen cannot flash.",
+            .available = ovpulse_available,
+            .on_change = row_changed, .user = (void *)"Pulse overview marker",
+        };
+        h_ovpulse = C->register_row(MOD_ID, &ov);
     }
 
     {
@@ -3923,8 +5686,8 @@ static int init(const az_core_v1 *core)
     tk_row_was = row_on();       /* 0.2.8: a start with the row off is silent; only a toggle is logged */
     memset(ring, 0, sizeof ring);                 /* pre-touch: no first-use page fault in a hook */
     __atomic_store_n(&al_live, 1, __ATOMIC_RELEASE);
-    LOG("loaded 0.2.15; filter: SHIFT+MEMORY/DELETE, SHIFT+pad arm+save when nothing of yours is lost (second press off), red pad, DELETE+pad (+ our own saved copy); deleteCue observer; template-free ANLZ build, flags at parse, wait-free filter/hot path, updatable toast (%s); setout=%d",
-        tsurf ? "surface" : "banner queue", orig_setout != NULL);
+    LOG("loaded 0.2.16; filter: SHIFT+MEMORY/DELETE, SHIFT+pad arm+save when nothing of yours is lost (second press off), red pad, DELETE+pad (+ our own saved copy); deleteCue observer; overview-pulse log-only (paint=%d update=%d, row default off, top-level, deck via PlayerInfoState +0x50/+0x58 or loop in/out, view=source|waveform); template-free ANLZ build, flags at parse, wait-free filter/hot path, updatable toast (%s); setout=%d",
+        orig_bar_paint != NULL, orig_alb_update != NULL, tsurf ? "surface" : "banner queue", orig_setout != NULL);
     return 0;
 }
 
