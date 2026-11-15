@@ -1,0 +1,19 @@
+{
+  "azmod": 1,
+  "id": "fader-start",
+  "name": "Fader Start",
+  "version": "0.0.7",
+  "author": "JC",
+  "summary": "Channel fader start: bringing a closed channel fader up plays its deck, exiting a loop first. Off by default.",
+  "description": "Test build. Master row \"Fader Start\" is OFF by default (off, it only logs what it would do). On: a channel fader brought up from closed plays the deck on that channel from where it stands, like PLAY. If the deck is looping and \"Exit loop on fader up\" is on, the loop is exited first and play is called only if paused; never reloops. Learns each deck from your first PLAY press, checks every object before each call; a paused deck whose loop is unknown still plays. Disarms on any failed check (row off and on re-arms). Not while automix hooks Play. Firmware 2.00/2.01 only.",
+  "license": "GPL-3.0-only",
+  "source": "https://github.com/johnnycoombes/az-mods/tree/main/fader-start",
+  "api": 1,
+  "firmware": [
+    "ep147-9e9454e357389ece"
+  ],
+  "hooks": true,
+  "min_core": "1.2.3",
+  "category": "controls",
+  "beta": true
+}

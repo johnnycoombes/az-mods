@@ -8,8 +8,9 @@ Built with the [AZ-MODS SDK](https://github.com/Kyle-Hosman/az-mods-sdk) v1.2.3 
 |---|---|---|
 | Active Loop Picker (`active-loop`) | [active-loop/](active-loop/) | Arms the rekordbox Active Loop (or the next stored loop) at track load so it engages when the playhead reaches it; SHIFT+MEMORY jumps to the next loop; SHIFT+pad arms a hot cue loop as the Active Loop and saves it (red pad) through the deck's own software, DELETE+pad deletes a loop (one SHIFT hold per DELETE hold); optional Auto-advance; **Pop-up messages** (on by default). **Pulse overview marker** (off by default, menu only) breathes the overview marker at the current Active Memory or Cue Loop on decks 1–4, including layer switches 1/3 and 2/4. Reads the stick's analysis files read-only and writes no file itself. **Patches the deck software's code.** |
 | Custom Tempo Range (`tempo-range`) | [tempo-range/](tempo-range/) | Remaps the TEMPO RANGE slots ±6/10 to ±4/8 (±16 and WIDE stay stock), so the cycle is 4/8/16/WIDE on all four decks; each slot has an on/off row under one **Custom Tempo Range** Mod Menu group. Draws the BPM with two decimals and a colour-coded range label (green ±4, orange ±8). **Patches the deck software's code.** Turn the `bpm2dp` mod off while it is on. |
+| Fader Start (`fader-start`) **BETA** | [fader-start/](fader-start/) | Channel fader start: bringing a closed channel fader up plays its deck, exiting a loop first (never reloops). **Off by default**: install, press **Allow**, switch the **Fader Start** row on, press PLAY once per deck to teach it, and press LOOP once to teach the loop exit. Not while automix hooks Play. **Patches the deck software's behaviour.** |
 
-Both mods support **firmware 2.00/2.01 only** (`ep147-9e9454e357389ece`); the deck
+All mods support **firmware 2.00/2.01 only** (`ep147-9e9454e357389ece`); the deck
 will not load them on any other firmware.
 
 ## Install
@@ -26,7 +27,7 @@ Mods run with full access to the deck: install what you trust, and keep a spare 
 ## Build
 
 ```sh
-azmod-pack build active-loop      # or tempo-range
+azmod-pack build active-loop      # or tempo-range, fader-start
 make -C active-loop test AZ_SDK=/path/to/az-mods-sdk
 ```
 
