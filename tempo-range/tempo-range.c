@@ -17,6 +17,11 @@
  *         WaveformView mode, read from its own paint call); range changes logged per deck.
  * 0.1.13: release build (source link, description); an unknown deck is skipped (no seen-order guess).
  * 0.1.12: decks 3/4 (deck from the player id, layer per side), panel colours, margins.
+ * 0.1.20: range label background green for +/-4, orange for +/-8 (16/WIDE stock).
+ * 0.1.19: range slots are on/off toggles with one target each (fixes 4,4,16,WIDE).
+ * 0.1.18: +/-8% back to even 0.02% steps (0.01% skipped values on the real fader).
+ * 0.1.17: every setting grouped under one "Custom Tempo Range" heading in the Mod Menu.
+ * 0.1.16: +/-8% quantised to 0.01% (was 0.02%); +/-4 already 0.01%, +/-16 stays 0.05%.
  * 0.1.11: BPM shown with two decimals (125.00) by an overlay; see "BPM with two decimals".
  *
  * 0.1.4:
@@ -98,49 +103,25 @@ static int pct[3] = { 4, 8, 16 };
 static int h_row[3] = { -1, -1, -1 };
 static int applied_pct[3] = { -1, -1, -1 };     /* last magnitude we applied+logged */
 static const int STOCK[3] = { 6, 10, 16 };
-static const char *const KEY[3] = { "pct6", "pct10", "pct16" };
-static const char *const LABEL[3] = { "Replace +/-6%", "Replace +/-10%", "Replace +/-16%" };
+/* 0.1.19: the slots are on/off toggles. 0.1.9-0.1.18 gave every slot the same std/4/8/16
+ * list, so turning +/-10 off (std) and back on stepped to the first choice, 4%, and the
+ * cycle became 4,4,16,WIDE. Each toggle now has exactly one target: on = TARGET, off =
+ * firmware stock. +/-16 -> 16 equals stock, so that slot has no row. New keys (the old
+ * pct6/pct10/pct16 indices are ignored): a fresh start is on = 4/8/16. */
+enum { NROW = 2 };
+static const int TARGET[3] = { 4, 8, 16 };
+static const char *const KEY[3] = { "use4", "use8", "pct16" };
+static const char *const LABEL[3] = { "+/-6% becomes +/-4%", "+/-10% becomes +/-8%", "+/-16%" };
+static const char *const HELP[2] = {
+    "On: the +/-6% slot runs at +/-4% (0.01% steps). Off: firmware +/-6%.",
+    "On: the +/-10% slot runs at +/-8% (0.02% steps). Off: firmware +/-10%.",
+};
 
-/* SDK: 2..8 choices per row. Index 0 = std (firmware 6/10/16). Same list on every row. */
-static const char *const CH_ALL[]  = { "std", "4%", "8%", "16%" };
-static const int         PCT_ALL[] = { 0, 4, 8, 16 };
-/* Fresh install defaults: map the three slots to 4 / 8 / 16. */
-static const int DEF_CHOICE[3] = { 1, 2, 3 };
-enum { NCHOICE = 4 };
-_Static_assert(sizeof CH_ALL / sizeof CH_ALL[0] == NCHOICE && sizeof PCT_ALL / sizeof PCT_ALL[0] == NCHOICE, "all");
-_Static_assert(NCHOICE >= 2 && NCHOICE <= 8, "SDK: 2..8 choices");
-static const char *const *const ROW_CH[3] = { CH_ALL, CH_ALL, CH_ALL };
-static const int *const ROW_PCT[3] = { PCT_ALL, PCT_ALL, PCT_ALL };
-
-static int idx_to_pct(int slot, int idx)          /* out of range -> std (0) */
+static int idx_to_pct(int slot, int on)           /* toggle value -> percent, 0 = stock */
 {
-    return (idx >= 0 && idx < NCHOICE) ? ROW_PCT[slot][idx] : 0;
+    return (slot >= 0 && slot < 3 && on == 1) ? TARGET[slot] : 0;
 }
-/* 0.1.8 saved choice indices against a longer list; 0.1.9+ uses 4 entries.
- * On first boot of this build, reset the three rows to the 4/8/16 defaults. */
-#define CFG_VER_KEY "cfg-ver"
-#define CFG_VER_NOW 10
-static void migrate_choice_rows(void)
-{
-    if (!AZ_HAS(C, cfg_get) || !AZ_HAS(C, cfg_set) || !AZ_HAS(C, row_set)) return;
-    int ver = C->cfg_get(MOD_ID, CFG_VER_KEY, 0);
-    if (ver >= CFG_VER_NOW) return;
-    for (int i = 0; i < 3; i++) {
-        if (h_row[i] < 0) continue;
-        C->row_set(h_row[i], DEF_CHOICE[i]);
-        pct[i] = idx_to_pct(i, DEF_CHOICE[i]);
-        applied_pct[i] = pct[i];
-    }
-    C->cfg_set(MOD_ID, CFG_VER_KEY, CFG_VER_NOW);
-    C->log(MOD_ID, "migrated choice rows from cfg-ver %d to %d", ver, CFG_VER_NOW);
-}
-static int pct_to_choice(int slot, int p)
-{
-    for (int i = 0; i < NCHOICE; i++)
-        if (ROW_PCT[slot][i] == p) return i;
-    return 0;
-}
-static int valid_pct(int slot, int p) { return p == 0 || pct_to_choice(slot, p) > 0; }
+static int valid_pct(int slot, int p) { return p == 0 || (slot >= 0 && slot < 3 && p == TARGET[slot]); }
 
 /* ---- label overlay -------------------------------------------------------------------- */
 static int dshow[NDECK];            /* per-deck magnitude to draw; 0 = hide */
@@ -344,6 +325,8 @@ static void paint_bpm(az_draw *d, az_rect a, int deck)
     if (lbl_outline) C->draw_rect(d, a.x, a.y, a.w, a.h, 2, 0x00FFFFu);
 }
 
+#define LBL_BG_4 0x00C853u   /* green  */
+#define LBL_BG_8 0xFF8C00u   /* orange */
 static void paint_label(az_draw *d, az_rect a, int deck)
 {
     int p = __atomic_load_n(&dshow[deck], __ATOMIC_RELAXED);
@@ -352,11 +335,15 @@ static void paint_label(az_draw *d, az_rect a, int deck)
     snprintf(s, sizeof s, "+/-%d", p);
     int vi = surf_vi < 0 ? 0 : surf_vi;
     int px = L[vi].px;
-    C->fill_rect(d, a.x, a.y, a.w, a.h, panel_bg());   /* opaque patch over the stock box */
+    /* 0.1.20: colour-coded ranges: +/-4 green, +/-8 orange, black text on both (readable
+     * on either, any theme). +/-16 and WIDE are stock, so this label never draws for them. */
+    uint32_t bg = p == 4 ? LBL_BG_4 : p == 8 ? LBL_BG_8 : panel_bg();
+    uint32_t fg = (p == 4 || p == 8) ? 0x000000u : panel_fg();
+    C->fill_rect(d, a.x, a.y, a.w, a.h, bg);            /* opaque patch over the stock box */
     int tw = AZ_HAS(C, text_width) ? C->text_width(s, px) : 0;
     int x = a.x + (a.w - tw) / 2; if (x < a.x) x = a.x;
     int y = a.y + (a.h - px * 3 / 2) / 2; if (y < a.y) y = a.y;
-    C->draw_text(d, x, y, s, px, panel_fg());
+    C->draw_text(d, x, y, s, px, fg);
     if (lbl_outline) C->draw_rect(d, a.x, a.y, a.w, a.h, 2, 0xFF00FFu);     /* after the fill */
 }
 
@@ -582,7 +569,9 @@ static void my_recompute(void *self)
         analog = applied = 0.0f;
     } else {
         /* Resolution scales with the range: 0.01% up to +/-6 (4% = 400 steps), 0.02% up to
-         * +/-12, 0.05% above (the stock 10/16 step). N x step = mult keeps the cap exact. */
+         * +/-12, 0.05% above (the stock 10/16 step). N x step = mult keeps the cap exact.
+         * 0.1.18: +/-8 back to 0.02%: the fader gives ~0.015%/notch there, so 0.01% skipped
+         * values unevenly (0.01, 0.03, 0.04...); 0.02% steps evenly. */
         float step = p <= 6 ? 0.0001f : p <= 12 ? 0.0002f : 0.0005f;
         float N = mult / step;
         analog = slider * mult;
@@ -746,35 +735,32 @@ static int init(const az_core_v1 *core)
     load_bpm_layout();
 
     if (AZ_HAS(C, register_row)) {
-        for (int i = 0; i < 3; i++) {
+        /* 0.1.17: one "Custom Tempo Range" heading holds every setting (range slots, label,
+         * BPM 2 decimals, 4-deck view, outline) so they sit together in the Mod Menu. Keys
+         * are unchanged, so saved values carry over. No heading = old flat layout. */
+        const az_row_v1 grow = {
+            .size = sizeof grow, .key = "settings", .label = "Custom Tempo Range",
+            .kind = AZ_ROW_GROUP,
+            .help = "All tempo-range settings: range slots, range label and 2-decimal BPM.",
+        };
+        const char *grp = C->register_row(MOD_ID, &grow) >= 0 ? "settings" : NULL;
+        if (!grp) C->log(MOD_ID, "register_row settings group refused: flat rows");
+        for (int i = 0; i < NROW; i++) {
             const az_row_v1 row = {
-                .size = sizeof row, .key = KEY[i], .label = LABEL[i],
-                .kind = AZ_ROW_CHOICE,
-                .choices = ROW_CH[i], .n_choices = NCHOICE,
-                .default_choice = DEF_CHOICE[i],
-                .help = "4 / 8 / 16 for the four-step cycle with WIDE. std = firmware 6/10/16. Applies at once.",
+                .size = sizeof row, .key = KEY[i], .label = LABEL[i], .parent = grp,
+                .kind = AZ_ROW_TOGGLE, .flags = AZ_ROW_DEFAULT_ON,
+                .help = HELP[i],
                 .on_change = on_choice, .user = (void *)(intptr_t)i,
             };
             h_row[i] = C->register_row(MOD_ID, &row);
             if (h_row[i] < 0) C->log(MOD_ID, "register_row %s refused", KEY[i]);
             if (h_row[i] >= 0) {
-                int idx = C->row_value(h_row[i]);
-                {
-                    pct[i] = idx_to_pct(i, idx);
-                    applied_pct[i] = pct[i];        /* boot value already in effect */
-                }
-            }
-        }
-        migrate_choice_rows();
-        for (int i = 0; i < 3; i++) {
-            if (h_row[i] >= 0 && AZ_HAS(C, row_value)) {
-                int idx = C->row_value(h_row[i]);
-                pct[i] = idx_to_pct(i, idx);
-                applied_pct[i] = pct[i];
+                pct[i] = idx_to_pct(i, C->row_value(h_row[i]));
+                applied_pct[i] = pct[i];        /* boot value already in effect */
             }
         }
         const az_row_v1 lrow = {
-            .size = sizeof lrow, .key = "label", .label = "Show range label",
+            .size = sizeof lrow, .key = "label", .label = "Show range label", .parent = grp,
             .kind = AZ_ROW_TOGGLE, .flags = AZ_ROW_DEFAULT_ON,
             .help = "Redraw the on-screen +/-NN TEMPO range label with the chosen value.",
         };
@@ -782,19 +768,19 @@ static int init(const az_core_v1 *core)
         /* A row, so "tempo-range:outline = 1" in MODS/azmods.cfg (where rows live) turns it on.
          * 0.1.6 read cfg_get("outline"), the per-mod settings file, so that line was never seen. */
         const az_row_v1 orow = {
-            .size = sizeof orow, .key = "outline", .label = "Label outline (align)",
+            .size = sizeof orow, .key = "outline", .label = "Label outline (align)", .parent = grp,
             .kind = AZ_ROW_TOGGLE,
             .help = "Draws a magenta frame round each label box, to check placement.",
         };
         const az_row_v1 brow = {
-            .size = sizeof brow, .key = "bpm2dp", .label = "BPM with 2 decimals",
+            .size = sizeof brow, .key = "bpm2dp", .label = "BPM with 2 decimals", .parent = grp,
             .kind = AZ_ROW_TOGGLE, .flags = AZ_ROW_DEFAULT_ON,
             .help = "Draws 125.00 over each deck's BPM (stock shows 125.0).",
         };
         if (AZ_HAS(C, row_value) && AZ_HAS(C, deck_bpm)) h_bpm = C->register_row(MOD_ID, &brow);
         static const char *const B4CH[] = { "range label", "BPM 125.00" };
         const az_row_v1 b4row = {
-            .size = sizeof b4row, .key = "bpm4", .label = "4-deck view shows",
+            .size = sizeof b4row, .key = "bpm4", .label = "4-deck view shows", .parent = grp,
             .kind = AZ_ROW_CHOICE, .choices = B4CH, .n_choices = 2, .default_choice = 0,
             .help = "4 overlays per mod: in the 4-deck view show either the +/-NN labels or 2-decimal BPM.",
         };
@@ -844,7 +830,7 @@ static int init(const az_core_v1 *core)
         return 4;
     }
 #endif
-    C->log(MOD_ID, "loaded 0.1.15; pct=%d/%d/%d label=%s outline=%d bpm2dp=%d", pct[0], pct[1],
+    C->log(MOD_ID, "loaded 0.1.20; pct=%d/%d/%d label=%s outline=%d bpm2dp=%d", pct[0], pct[1],
            pct[2], S[0] ? "overlay" : "off", lbl_outline,
            h_bpm >= 0 ? C->row_value(h_bpm) : -1);
     return 0;

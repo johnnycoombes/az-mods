@@ -1,11 +1,34 @@
 # Custom Tempo Range (`tempo-range`)
 
-Maps the three non-WIDE TEMPO RANGE slots (±6%, ±10%, ±16%) to ±4%, ±8%, and
-±16% by default, so the TEMPO RANGE cycle is 4% → 8% → 16% → WIDE. Each slot
-can still be set back to stock. WIDE stays ±100%.
+Maps the non-WIDE TEMPO RANGE slots ±6% and ±10% to ±4% and ±8% by default, so the
+TEMPO RANGE cycle is 4% → 8% → 16% → WIDE. Each of the two slots has an on/off row in the
+Mod Menu; off gives the firmware's stock range back. ±16% and WIDE (±100%) stay stock.
+The on-screen range label is green for ±4 and orange for ±8.
 
 **This mod patches EP147.** It declares `"hooks": true` and only loads on
 firmware tag `ep147-9e9454e357389ece` (stock EP147 for XDJ-AZ 2.00 and 2.01).
+
+## 0.1.20 - what changed since the published 0.1.16
+
+The published 0.1.16 release was the 0.1.15 code with the BETA flag removed. The development
+builds numbered 0.1.16 to 0.1.19 below were never released on their own; 0.1.20 includes all of them.
+
+- **0.1.20: colour-coded range label.** The ±NN label background is green `#00C853` for ±4 and
+  orange `#FF8C00` for ±8, with black text on both, on every theme. ±16 and WIDE are stock, so the
+  label never draws for them.
+- **0.1.19: range slots are on/off rows (bug fix).** Before, every slot row had the same
+  `std/4/8/16` list, so switching the ±10 slot to `std` and back gave ±4% and the cycle became
+  4, 4, 16, WIDE. Now each row has one target: **+/-6% becomes +/-4%** (key `use4`) and
+  **+/-10% becomes +/-8%** (key `use8`), both on by default, so a fresh start is 4/8/16. The ±16
+  row is gone because ±16 is the same as stock. **The old `pct6`/`pct10`/`pct16` settings are
+  ignored**: if you had switched a slot off, switch it off again in the Mod Menu.
+- **0.1.18: ±8% moves in 0.02% steps.** 0.1.16 and 0.1.17 tried 0.01% steps for ±8%; on the
+  deck the fader skipped values unevenly. ±4% keeps 0.01% steps and ±16% 0.05%.
+- **0.1.17: one Mod Menu group.** Every setting (range slots, range label, BPM with 2 decimals,
+  4-deck view, label outline) sits under one **Custom Tempo Range** group.
+- **0.1.16: finer ±8%.** ±8% was quantised to 0.01% instead of 0.05% (changed again in 0.1.18).
+
+Tested by JC on his XDJ-AZ on 15 Nov 2026 (firmware 2.00/2.01, AZ-MODS 1.2.9).
 
 ## Conflicts
 
@@ -39,10 +62,10 @@ tempo-range is on.
   - `TempoControl+0x18` — quantised pitch (what playback uses)
 - Re-calls `ST_SET_TEMPO` at `0x1525c80` with the new applied value so the
   player engine, Pro DJ Link status and SYNC followers see it.
-- Quantiser keeps `N × step = mult` (step 0.0002 for a replaced-6% slot,
-  0.0005 otherwise). Values are clamped to ±1.0 (the firmware's hard ceiling).
-- Three Mod Menu CHOICE rows pick the magnitude; `stock` leaves that slot
-  alone. Settings follow the USB.
+- Quantiser keeps `N × step = mult`: step 0.0001 (0.01%) for ±4%, 0.0002 (0.02%) for ±8%,
+  0.0005 (0.05%) for ±16%. Values are clamped to ±1.0 (the firmware's hard ceiling).
+- Two Mod Menu on/off rows (`use4`, `use8`, default on) under the **Custom Tempo Range**
+  group; off leaves that slot stock. Settings follow the USB (`MODS/azmods.cfg`).
 
 ## What it does not do
 
@@ -50,8 +73,6 @@ tempo-range is on.
 - Does **not** redraw the pitch-scale artwork — ticks stay at the stock
   6/10/16/100 marks, so a custom range is numerically right but the printed
   scale will not match.
-- Does **not** lift the ±100% clamp. Ranges above 50% are offered but still
-  capped by `ST_SET_TEMPO`.
 - Does **not** add a fifth range (the MYSETTING enum and scale art are fixed).
 
 ## BPM with two decimals (0.1.11)
@@ -125,10 +146,12 @@ so `claim_hook` should accept the address. Confirm in the mod log after load:
    `ep147-9e9454e357389ece`. Any other tag: the mod stays off.
 2. Install / push the mod. Check `/tmp/azmod-community/tempo-range.log` for
    `hooked recompute`. A refused claim shows the reason there.
-3. Mod Menu → set e.g. **Replace ±16%** to `24%`. Leave the others on stock.
-4. On a loaded deck, press TEMPO RANGE until the 16% slot is selected (third
-   non-WIDE position). Move the pitch fader to the end: the % readout and the
-   track's BPM should reach about ±24%, not ±16%.
+3. Mod Menu → **Custom Tempo Range**: leave **+/-6% becomes +/-4%** and
+   **+/-10% becomes +/-8%** on.
+4. On a loaded deck, press TEMPO RANGE: the cycle is 4% (green label) → 8% (orange
+   label) → 16% → WIDE. Move the pitch fader to the end in the 4% slot: the % readout
+   and the track's BPM should reach about ±4%, not ±6%. Switch a row off and on
+   again: the cycle stays 4/8/16.
 5. Switch to WIDE: behaviour must be unchanged (±100%).
 6. Turn SYNC on: pitch must snap to 0 (the sync flag at `+0x20` still wins).
 7. Link: a second player SYNCing to this deck should follow the new
@@ -144,7 +167,7 @@ so `claim_hook` should accept the address. Confirm in the mod log after load:
 - **Quantiser mismatch** if `N×step ≠ mult` — this mod keeps them equal.
 - **Scale art mismatch** — cosmetic, but easy to misread on stage.
 - **Link / SYNC** — followers track the new pitch; that is intended.
-- Tested on JC's XDJ-AZ (fw 2.00/2.01) and on the emulator for 0.1.15.
+- Tested on JC's XDJ-AZ (fw 2.00/2.01, AZ-MODS 1.2.9) for 0.1.20 on 15 Nov 2026; 0.1.15 was also run on the emulator.
 
 ## If playback does not follow
 
