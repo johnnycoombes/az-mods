@@ -28,13 +28,13 @@
     {
       "id": "tempo-range",
       "name": "Custom Tempo Range",
-      "version": "0.1.20",
+      "version": "0.1.21",
       "author": "JC",
       "summary": "Maps +/-6/10/16 TEMPO slots to +/-4/8/16; WIDE stays +/-100%. Shows deck BPM with 2 decimals (125.00).",
-      "icon": "https://github.com/johnnycoombes/az-mods/releases/download/tempo-range-0.1.20/tempo-range-0.1.20-icon.png",
-      "package": "https://github.com/johnnycoombes/az-mods/releases/download/tempo-range-0.1.20/tempo-range-0.1.20.azmod",
-      "sha256": "2932d3ab5e3cbffab4ba5f4da2537fb9bbf0c2991d7a7e025e4f472473b6404f",
-      "size": 66010,
+      "icon": "https://github.com/johnnycoombes/az-mods/releases/download/tempo-range-0.1.21/tempo-range-0.1.21-icon.png",
+      "package": "https://github.com/johnnycoombes/az-mods/releases/download/tempo-range-0.1.21/tempo-range-0.1.21.azmod",
+      "sha256": "a75da7696e250001295a01851c96ede7058336979bff626289682dc273519d77",
+      "size": 65994,
       "firmware": [
         "ep147-9e9454e357389ece"
       ],

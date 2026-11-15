@@ -830,7 +830,7 @@ static int init(const az_core_v1 *core)
         return 4;
     }
 #endif
-    C->log(MOD_ID, "loaded 0.1.20; pct=%d/%d/%d label=%s outline=%d bpm2dp=%d", pct[0], pct[1],
+    C->log(MOD_ID, "loaded 0.1.21; pct=%d/%d/%d label=%s outline=%d bpm2dp=%d", pct[0], pct[1],
            pct[2], S[0] ? "overlay" : "off", lbl_outline,
            h_bpm >= 0 ? C->row_value(h_bpm) : -1);
     return 0;

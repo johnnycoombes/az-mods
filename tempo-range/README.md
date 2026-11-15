@@ -8,10 +8,14 @@ The on-screen range label is green for ±4 and orange for ±8.
 **This mod patches EP147.** It declares `"hooks": true` and only loads on
 firmware tag `ep147-9e9454e357389ece` (stock EP147 for XDJ-AZ 2.00 and 2.01).
 
-## 0.1.20 - what changed since the published 0.1.16
+## 0.1.21 - what changed since the published 0.1.16
 
 The published 0.1.16 release was the 0.1.15 code with the BETA flag removed. The development
 builds numbered 0.1.16 to 0.1.19 below were never released on their own; 0.1.20 includes all of them.
+
+- **0.1.21: BETA flag removed.** 0.1.21 is 0.1.20 with `"beta": true` removed from the manifest;
+  only the version and the startup log line (`loaded 0.1.21`) change. The code is functionally
+  identical (the `.so` differs only in its ELF build-id and that log digit).
 
 - **0.1.20: colour-coded range label.** The ±NN label background is green `#00C853` for ±4 and
   orange `#FF8C00` for ±8, with black text on both, on every theme. ±16 and WIDE are stock, so the
@@ -28,7 +32,7 @@ builds numbered 0.1.16 to 0.1.19 below were never released on their own; 0.1.20 
   4-deck view, label outline) sits under one **Custom Tempo Range** group.
 - **0.1.16: finer ±8%.** ±8% was quantised to 0.01% instead of 0.05% (changed again in 0.1.18).
 
-Tested by JC on his XDJ-AZ on 15 Nov 2026 (firmware 2.00/2.01, AZ-MODS 1.2.9).
+Tested by JC on his XDJ-AZ on 15 Nov 2026 (firmware 2.00/2.01, AZ-MODS 1.2.9): the deck-tested build is 0.1.20.
 
 ## Conflicts
 
@@ -167,7 +171,7 @@ so `claim_hook` should accept the address. Confirm in the mod log after load:
 - **Quantiser mismatch** if `N×step ≠ mult` — this mod keeps them equal.
 - **Scale art mismatch** — cosmetic, but easy to misread on stage.
 - **Link / SYNC** — followers track the new pitch; that is intended.
-- Tested on JC's XDJ-AZ (fw 2.00/2.01, AZ-MODS 1.2.9) for 0.1.20 on 15 Nov 2026; 0.1.15 was also run on the emulator.
+- Tested on JC's XDJ-AZ (fw 2.00/2.01, AZ-MODS 1.2.9) for 0.1.20 on 15 Nov 2026 (0.1.21 is the same code without the BETA flag); 0.1.15 was also run on the emulator.
 
 ## If playback does not follow
 
