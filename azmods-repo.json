@@ -2,7 +2,7 @@
   "azmods_repo": 1,
   "name": "JC's AZ Mods",
   "maintainer": "johnnycoombes",
-  "homepage": "https://github.com/johnnycoombes/az-mods/tree/main/active-loop",
+  "homepage": "https://github.com/johnnycoombes/az-mods",
   "mods": [
     {
       "id": "active-loop",
