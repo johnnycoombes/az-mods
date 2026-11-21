@@ -18,6 +18,76 @@ Community mod for AZ-MODS on the Pioneer XDJ-AZ (EP147 2.00 / 2.01).
 
 SHIFT+CALL is not used by the mod. (Earlier notes said stock doubles/halves the loop with it. Correction: stock CALL picks double or half from the loop state, not from SHIFT.)
 
+
+## 0.2.19 - Jog shows reaches all four values
+
+AZ-MODS 1.2.5's group pane draws every member as a checkbox and never the 4-way
+bank buttons, while a tap still hits the invisible bank rects. In 0.2.18 that
+made Jog shows jump between Off and Time + Bar. 0.2.19 drops the `settings`
+GROUP (no saved value) and uses the enable TOGGLE as the single **Active Loop**
+heading, so Jog shows is a 4-way bank in the OPTIONS pane: tap a value, or
+knob-click to cycle Off → Time → Bar → Time + Bar → Off. Key `jog-shows` and
+default Time + Bar are unchanged.
+
+The package description is under 599 bytes (the deck truncates at 599). The 30 s
+timing line always reports `evdrop` (0 when the hook ring has not dropped anything).
+Saved-loop auto-arm is unchanged (pre-existing).
+
+The **Time + Bar** bank button is clipped at the right edge of the OPTIONS pane;
+it still works (tap or knob).
+
+![Active Loop page with Enable and the OPTIONS pane (AZ-EMU)](docs/images/options-pane.png)
+
+*AZ-EMU screenshot: **Active Loop** is the top-level enable toggle. Its other settings, including **Jog shows**, sit in the scrolling OPTIONS pane.*
+
+![OPTIONS pane scrolled to Jog shows (AZ-EMU)](docs/images/options-pane-scroll.png)
+
+*AZ-EMU screenshot: **Jog shows** set to Time + Bar. The rightmost bank button is clipped at the pane edge; it is still tappable, and the knob still reaches this value.*
+
+## 0.2.18 - a static Active Loop image on the jog
+
+When a deck has a current Active Loop, its jog centre can show a **static** 181×181 image in place of the artwork: a red **ACTIVE LOOP** caption and the loop's in-point. The value is never live. It only changes when the loop changes, TIME/REMAIN is toggled, or the track or grid changes.
+
+A new row in the existing **Active Loop** group:
+
+7. **Jog shows** (key `jog-shows`, default **Time + Bar**) — Off / Time / Bar / Time + Bar. Off is stock artwork. Grayed while Active Loop is off.
+
+- **Time** follows the deck's TIME/REMAIN mode (TimeRemainState +0xb0), formatted `03:12.640`. REMAIN uses the track length at the time widget info +0xe8 (`deck_info.len_s` is −1 on this core).
+- **Bar** is `bar.beat` from the beat grid (LoadState from the time widget +0x130, then +0x180, checked with vtables and 'XOCR', as in jogprobe 0.0.3). Bars count from the first downbeat as **1.1**, like rekordbox; pickups are 0.4, 0.3, … With no usable grid, Bar and Time + Bar show the Time layout.
+- Custom image mode (`coll+0x118`) is not overridden. Clearing the loop, or setting Jog shows to Off, restores EP147's cached artwork (`coll+0xf8`), or a blank 1×1 if there was no artwork.
+- The first send waits for EP147's own artwork send plus 2.5 s (or 2.5 s after load if the track has no artwork), then at most one send per second per deck. Queued pieces are dropped before a new send.
+- Collectors are per deck (view8 1 and 3 left bus, 2 and 4 right bus). An unknown or invalid pointer falls back to stock. The mod never writes to the USB or to ANLZ.
+- Quiet logging: a `JOG dN send "…" jpeg=… pieces=… us=…` or `JOG dN restore artwork|blank us=…` line only when a send or restore happens.
+
+0.2.17 behaviour, combos and the single **Active Loop** heading are unchanged. The new row is last in that group so existing keys and defaults still apply.
+
+See `TESTPLAN.md` for the AZ-EMU steps. Host `test/jog_test.c` covers formatting (time, remain, bar.beat including pickups), the throttle and restore plan, and a JPEG smoke test.
+
+| Time | Bar | Time + Bar |
+|---|---|---|
+| ![Jog centre, Time mode (AZ-EMU)](docs/images/jog-time.png) | ![Jog centre, Bar mode (AZ-EMU)](docs/images/jog-bar.png) | ![Jog centre, Time + Bar mode (AZ-EMU)](docs/images/jog-time-bar.png) |
+
+*AZ-EMU screenshots: the jog centre while an Active Loop is armed, in **Time**, **Bar**, and **Time + Bar**. The values are the loop in-point, not the playhead. **TIME** or **REMAIN** follows the deck's current mode.*
+
+![Jog centre close-up, Time + Bar with REMAIN (AZ-EMU)](docs/images/jog-time-bar-remain.png)
+
+*AZ-EMU screenshot: Time + Bar close-up, with **REMAIN** selected, showing the in-point remain time and bar.beat.*
+
+## 0.2.17 - one Mod Menu heading
+
+Every setting now sits under one **Active Loop** heading in the Mod Menu (the same grouping tempo-range uses). The rows, their keys, defaults and behaviour are unchanged, so existing `MODS/azmods.cfg` values still apply:
+
+1. **Active Loop** (key `enable`, default **on**) — master switch.
+2. **Auto-advance** (key `auto-advance`, default **on**).
+3. **Re-arm** (key `rearm`, default **on**).
+4. **Pulse armed pad** (key `pulse`, default **on**).
+5. **Pulse overview marker** (key `overview-pulse`, default **off**) — now on this same page; still grayed while Active Loop is off.
+6. **Pop-up messages** (key `popups`, default **on**).
+
+The combo, pad-arm and clear actions have no menu rows (hardcoded on while Active Loop is on, as since 0.2.1). There is no logging/debug row. The help page with the combo list is unchanged.
+
+If the heading cannot be registered, the 0.2.16 layout is kept: the four OPTIONS children under the Active Loop switch, and Pulse overview marker on its own top-level row (a fifth OPTIONS child overflowed the right pane).
+
 ## 0.2.16 - the overview marker can pulse, on all four decks
 
 **Pulse overview marker** (Mod Menu, default **off**, no key combo; grayed while Active Loop is off). On: the track-overview marker at the current Active Memory or Cue Loop breathes red (4 s). The jog screen does not flash. Off: the marker stays solid, and it still moves with the picker.

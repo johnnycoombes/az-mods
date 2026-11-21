@@ -1,7 +1,32 @@
 /* SPDX-License-Identifier: GPL-3.0-only
  *
- * active-loop 0.2.16 — Active Loop Picker for EP147 (XDJ-AZ 2.00/2.01).
+ * active-loop 0.2.19 — Active Loop Picker for EP147 (XDJ-AZ 2.00/2.01).
  *
+ * 0.2.19: Jog shows is still a 4-way CHOICE (key jog-shows, default Time + Bar)
+ *         but the 0.2.17 AZ_ROW_GROUP heading is dropped: AZ-MODS 1.2.5's group
+ *         pane always draws a checkbox and never bank buttons, while taps still
+ *         hit invisible bank rects (a click on the box set Time + Bar). Enable
+ *         is the top-level TOGGLE heading; its OPTIONS pane draws the four banks
+ *         and the knob cycles Off → Time → Bar → Time + Bar → Off. Saved keys
+ *         and defaults are unchanged. The 30 s timing line always reports evdrop.
+ *         Saved-loop auto-arm is unchanged (pre-existing).
+ * 0.2.18: when a deck has a current Active Loop, its jog centre can show a static
+ *         181×181 image (red "ACTIVE LOOP" caption + in-point Time and/or Bar) in
+ *         place of the artwork. New row "Jog shows" (Off / Time / Bar / Time + Bar,
+ *         default Time + Bar). Off = stock.
+ *         Sent only on change; never live; Custom mode is not overridden; clearing
+ *         the loop or switching Off restores the cached artwork. 0.2.17 behaviour
+ *         is unchanged aside from the 0.2.19 menu heading noted above.
+ * 0.2.17: every Mod Menu setting sits under one "Active Loop" heading (AZ_ROW_GROUP
+ *         key "settings"), like tempo-range 0.1.17. Keys, defaults and values are
+ *         unchanged, so existing azmods.cfg lines carry over. Order: Active Loop
+ *         (enable), Auto-advance, Re-arm, Pulse armed pad, Pulse overview marker,
+ *         Pop-up messages. The four OPTIONS children stay parented to enable, and
+ *         Pulse overview marker is parented to enable when the group registers, so
+ *         they stay grayed and row_value still requires enable on. If the group is
+ *         refused, the 0.2.16 layout is kept (OPTIONS under enable; Pulse overview
+ *         marker top-level with available()): a fifth OPTIONS child overflows the
+ *         right pane. No new keys; combo/pad/clear stay hardcoded as in 0.2.1.
  * 0.2.16: overview Active Loop marker pulse (ActiveLoopBar::Bar). New Mod Menu row
  *         "Pulse overview marker" (default OFF, top-level; grayed while Active Loop is off).
  *         Hooks Bar::paint (0x1d6c8a8) and ActiveLoopBar::update (0x1d6c380). Deck id comes
@@ -497,6 +522,8 @@ static ev_t     ring[RING] __attribute__((aligned(64)));
 static uint32_t ring_w __attribute__((aligned(64)));   /* atomic */
 static uint32_t ring_r;     /* tick-only */
 static uint32_t ring_drop;  /* atomic */
+static uint32_t evdrop_period;   /* tick-only: hook-ring drops since the last timing line */
+static uint32_t evdrop_session;  /* tick-only: hook-ring drops since init */
 static int      ring_stall;
 
 /* ---- filter -> tick (0.1.7) ----
@@ -605,6 +632,10 @@ static uint64_t now_ns(void)
 
 static int h_autoadv = -1, h_rearm = -1;
 static int h_enable = -1;
+static void jog_tick(int enabled);
+static void jog_note_load_d(int d, uint64_t now);
+static void jog_claim(void);
+static void jog_row_changed(int value, void *user);
 static int h_popups = -1;                   /* 0.2.15: Mod Menu row "Pop-up messages" */
 static int h_pulse = -1;                    /* 0.2.11: Mod Menu row "Pulse armed pad" */
 static int h_ovpulse = -1;                  /* 0.2.16: Mod Menu row "Pulse overview marker" (default off) */
@@ -1588,7 +1619,11 @@ static void drain_ring(void)
         }
     }
     uint32_t dr = __atomic_exchange_n(&ring_drop, 0, __ATOMIC_RELAXED);
-    if (dr) LOG("ring: dropped %u hook events", dr);
+    if (dr) {
+        evdrop_period += dr;
+        evdrop_session += dr;
+        LOG("ring: dropped %u hook events", dr);
+    }
 }
 
 static void log_binds(void)
@@ -3398,10 +3433,12 @@ static void timing_log(void)
     if (c > smax_c) smax_c = c;
     tot_o2 += fo2; tot_go += go;
 #define US(x) ((double)(x) * 1e6 / (double)fq)
+    uint32_t evd = evdrop_period;
+    evdrop_period = 0;
     LOG("timing 30s (us, own code, cntvct): filter, every call: max %.1f (session %.1f), >100us %u, >200us %u (session %u); "
         "frame gap max %.0f (session %.0f), typical interval %.0f, stalls (gap > 3x typical) %u (session %u); frames %.0f, edge frames %u; "
-        "engage hot path max %.1f (session %.1f) w/fw %.1f rare %.1f; cue hooks max %.1f (session %.1f)",
-        US(f), US(smax_f), fo, fo2, tot_o2, US(g), US(smax_g), US(__atomic_load_n(&FS.fi, __ATOMIC_RELAXED)), go, tot_go, nfr, ne, US(e), US(smax_e), US(ea), US(er), US(c), US(smax_c));
+        "engage hot path max %.1f (session %.1f) w/fw %.1f rare %.1f; cue hooks max %.1f (session %.1f); evdrop %u (session %u)",
+        US(f), US(smax_f), fo, fo2, tot_o2, US(g), US(smax_g), US(__atomic_load_n(&FS.fi, __ATOMIC_RELAXED)), go, tot_go, nfr, ne, US(e), US(smax_e), US(ea), US(er), US(c), US(smax_c), evd, evdrop_session);
 #undef US
 }
 
@@ -3449,6 +3486,7 @@ static void track_changed(int d, const char *why)
     ovp_sess_set(d, OVP_SESS_STOCK);
     restore_pending[d] = rem_ok[d] && rem_cid[d] != 0;      /* only a remembered loop of the previous load can come back */
     restore_wait[d] = 0;
+    jog_note_load_d(d, now_ns());
 }
 /* 0.2.8 al028f: the three paths that see a load (the core's deck event, the load cues of the hooks, the content-id poll)
  * report ONE load, so only the first of them within the load's window runs track_changed (and logs it). A repeat is
@@ -4517,7 +4555,7 @@ static int ovp_on_edge_ready(uint64_t on_ns, uint64_t now,
 }
 
 /* Pure: any organic paint_seen newer than the last live-bar refresh. */
-static int ovp_fresh_paint_notes(const uintptr_t *ptrs, const uint64_t *seen,
+static int __attribute__((unused)) ovp_fresh_paint_notes(const uintptr_t *ptrs, const uint64_t *seen,
                                  int n, uint64_t last_refresh_ns)
 {
     int i;
@@ -4626,7 +4664,7 @@ static int ovp_any_flagged_deck(void)
     return 0;
 }
 
-static int ovp_matches_flagged_ends(int d, int64_t lin, int64_t lout)
+static int __attribute__((unused)) ovp_matches_flagged_ends(int d, int64_t lin, int64_t lout)
 {
     int i;
     if (d < 0 || d >= NDECK || !ovp_ends_visible(lin, lout)) return 0;
@@ -5393,6 +5431,7 @@ static void my_tick(void)
             __atomic_store_n(&hold_pub[d], holder_of(d), __ATOMIC_RELAXED);
             __atomic_store_n(&arm_in[d], INT64_MAX, __ATOMIC_RELAXED);
         }
+        jog_tick(0);                     /* 0.2.18: restore artwork if we were showing */
         return;
     }
     if (!tk_row_was) { tk_row_was = 1; row_went_on(); }
@@ -5424,6 +5463,7 @@ static void my_tick(void)
     ready_flush();
     log_binds();
     flush_toast();
+    jog_tick(1);
 }
 
 static void on_draw(az_draw *d, az_rect a, void *user)
@@ -5490,6 +5530,8 @@ static int delete_target_ok(void)
     return 1;
 }
 
+#include "jog_hooks.c"
+
 static int claim_all(void)
 {
     if (!target_ok(VA_STORE, "store") || !target_ok(VA_CALL, "call") || !target_ok(VA_LOAD, "load"))
@@ -5553,6 +5595,7 @@ static int claim_all(void)
             LOG("overview-pulse: update hook at %#lx (log-only)", (unsigned long)VA_ALB_UPDATE);
         }
     }
+    jog_claim();                         /* 0.2.18: optional; a refusal leaves 0.2.17 behaviour */
     return 0;
 }
 
@@ -5601,9 +5644,20 @@ static int init(const az_core_v1 *core)
     }
 
     if (AZ_HAS(C, register_row)) {
+        /* 0.2.19: enable is the top-level heading (a TOGGLE, as in 0.2.16 and
+         * miniwave). AZ-MODS 1.2.5 c_draw_group always draws a checkbox and never
+         * bank/choice buttons; hit-testing still uses invisible bank rects, so a
+         * 4-way CHOICE in the 0.2.17 GROUP could only be set to Off (knob step
+         * 3→0) or Time + Bar (a tap lands on the rightmost bank button). The
+         * OPTIONS pane of a TOGGLE parent draws the four banks and the knob
+         * cycles Off → Time → Bar → Time + Bar → Off. 1.2.5 OPTIONS panes
+         * scroll, so the 0.2.17 overflow reason no longer applies. The unused
+         * "settings" GROUP key had no value. Children stay parented to enable so
+         * they gray and row_value still requires enable on. Saved keys and
+         * defaults are unchanged. */
         const az_row_v1 en = {
             .size = sizeof en, .key = "enable", .label = "Active Loop",
-            .kind = AZ_ROW_TOGGLE, .flags = AZ_ROW_DEFAULT_ON,
+            .kind = AZ_ROW_TOGGLE, .flags = AZ_ROW_DEFAULT_ON, .parent = NULL,
             .help = "SHIFT+MEMORY next loop, SHIFT+pad arm+save a hot loop (red pad; again = off), DELETE+pad delete, SHIFT+DELETE clear.",
             .on_change = row_changed, .user = (void *)"Active Loop",
         };
@@ -5629,6 +5683,17 @@ static int init(const az_core_v1 *core)
             .on_change = row_changed, .user = (void *)"Pulse armed pad",
         };
         h_pulse = C->register_row(MOD_ID, &pu);
+        /* When grouped, parent this to enable (it still appears on the group pane via
+         * descendants, and stays inert while Active Loop is off). Top-level with
+         * available() if the group was refused, as in 0.2.16. */
+        const az_row_v1 ov = {
+            .size = sizeof ov, .key = "overview-pulse", .label = "Pulse overview marker",
+            .kind = AZ_ROW_TOGGLE, .flags = 0, .parent = "enable",
+            .help = "Track-overview marker at an ACTIVE Memory/Cue loop breathes red (4 s). Menu only, no key combo. Default off. Grayed while Active Loop is off. Jog screen cannot flash.",
+            .available = ovpulse_available,
+            .on_change = row_changed, .user = (void *)"Pulse overview marker",
+        };
+        h_ovpulse = C->register_row(MOD_ID, &ov);
         const az_row_v1 po = {
             .size = sizeof po, .key = "popups", .label = "Pop-up messages",
             .kind = AZ_ROW_TOGGLE, .flags = AZ_ROW_DEFAULT_ON, .parent = "enable",
@@ -5636,18 +5701,14 @@ static int init(const az_core_v1 *core)
             .on_change = row_changed, .user = (void *)"Pop-up messages",
         };
         h_popups = C->register_row(MOD_ID, &po);
-        const az_row_v1 ov = {
-            .size = sizeof ov, .key = "overview-pulse", .label = "Pulse overview marker",
-            .kind = AZ_ROW_TOGGLE, .flags = 0, .parent = NULL,
-            /* Top-level on purpose: a fifth OPTIONS child under enable overflows the
-             * right pane (4 children fit, 5 sit under the waveform). al0216a: one tap
-             * at (2475,1390) hit both Pop-up messages and this row. available() grays
-             * it while Active Loop is off, matching the old parent="enable" inertness. */
-            .help = "Track-overview marker at an ACTIVE Memory/Cue loop breathes red (4 s). Menu only, no key combo. Default off. Grayed while Active Loop is off. Jog screen cannot flash.",
-            .available = ovpulse_available,
-            .on_change = row_changed, .user = (void *)"Pulse overview marker",
+        const az_row_v1 js = {
+            .size = sizeof js, .key = "jog-shows", .label = "Jog shows",
+            .kind = AZ_ROW_CHOICE, .parent = "enable",
+            .choices = JOGSHOW_CH, .n_choices = 4, .default_choice = JOGSHOW_BOTH,
+            .help = "On the jog centre, while this deck has a current Active Loop: Off (artwork), Time, Bar, or Time + Bar. Default Time + Bar. Static: it only changes when the loop, TIME/REMAIN, track or grid changes. Custom image is left alone.",
+            .on_change = jog_row_changed,
         };
-        h_ovpulse = C->register_row(MOD_ID, &ov);
+        h_jogshow = C->register_row(MOD_ID, &js);
     }
 
     {
@@ -5675,7 +5736,7 @@ static int init(const az_core_v1 *core)
 
 #ifdef AZ_HARNESS   /* TEST-ONLY: no hooks under the harness (claim_hook fails the api gate) */
     int cr = 0;
-    (void)claim_all;
+    (void)claim_all; (void)jog_claim;
 #else
     int cr = claim_all();
 #endif
@@ -5686,7 +5747,7 @@ static int init(const az_core_v1 *core)
     tk_row_was = row_on();       /* 0.2.8: a start with the row off is silent; only a toggle is logged */
     memset(ring, 0, sizeof ring);                 /* pre-touch: no first-use page fault in a hook */
     __atomic_store_n(&al_live, 1, __ATOMIC_RELEASE);
-    LOG("loaded 0.2.16; filter: SHIFT+MEMORY/DELETE, SHIFT+pad arm+save when nothing of yours is lost (second press off), red pad, DELETE+pad (+ our own saved copy); deleteCue observer; overview-pulse log-only (paint=%d update=%d, row default off, top-level, deck via PlayerInfoState +0x50/+0x58 or loop in/out, view=source|waveform); template-free ANLZ build, flags at parse, wait-free filter/hot path, updatable toast (%s); setout=%d",
+    LOG("loaded 0.2.19; filter: SHIFT+MEMORY/DELETE, SHIFT+pad arm+save when nothing of yours is lost (second press off), red pad, DELETE+pad (+ our own saved copy); deleteCue observer; overview-pulse log-only (paint=%d update=%d, row default off, grouped, deck via PlayerInfoState +0x50/+0x58 or loop in/out, view=source|waveform); template-free ANLZ build, flags at parse, wait-free filter/hot path, updatable toast (%s); setout=%d",
         orig_bar_paint != NULL, orig_alb_update != NULL, tsurf ? "surface" : "banner queue", orig_setout != NULL);
     return 0;
 }
